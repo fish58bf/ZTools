@@ -256,12 +256,14 @@ class APIManager {
   /**
    * 在指定插件中查找匹配的命令
    */
-  private findCommandInPlugin(
+  private async findCommandInPlugin(
     plugin: any,
     cmdName: string
-  ): { feature: any; cmdLabel: string; cmdType: string } | null {
+  ): Promise<{ feature: any; cmdLabel: string; cmdType: string } | null> {
     const dynamicFeatures = pluginFeatureAPI.loadDynamicFeatures(plugin.name)
-    const allFeatures = [...(plugin.features || []), ...dynamicFeatures]
+    const webSearchFeatures =
+      plugin.name === 'system' ? await webSearchAPI.getSearchEngineFeatures() : []
+    const allFeatures = [...(plugin.features || []), ...dynamicFeatures, ...webSearchFeatures]
 
     for (const feature of allFeatures) {
       if (feature.cmds && Array.isArray(feature.cmds)) {
@@ -368,7 +370,7 @@ class APIManager {
           return
         }
 
-        const result = this.findCommandInPlugin(plugin, cmdName)
+        const result = await this.findCommandInPlugin(plugin, cmdName)
         if (!result) {
           const msg = `[API] 未找到命令: ${pluginDescription}/${cmdName}`
           console.error(msg)
@@ -391,7 +393,7 @@ class APIManager {
         const pluginMatches: { plugin: any; feature: any; cmdLabel: string; cmdType: string }[] = []
 
         for (const plugin of pluginList) {
-          const result = this.findCommandInPlugin(plugin, cmdName)
+          const result = await this.findCommandInPlugin(plugin, cmdName)
           if (result) {
             pluginMatches.push({
               plugin,
