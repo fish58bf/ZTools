@@ -36,6 +36,8 @@ import {
 
 console.log('[Plugin] mainPreload', mainPreload)
 
+const PLUGIN_OUT_GRACE_MS = 200
+
 /**
  * 为插件视图注册外部链接拦截器
  * 同源 http/https 导航保留在插件内部，跨源链接使用系统默认浏览器打开，避免开发中插件热更新导致错误地在浏览器打开
@@ -1042,10 +1044,8 @@ export class PluginManager {
         // 插件在主窗口中运行
         const { view } = this.pluginViews[index]
 
-        // 发送插件退出事件（isKill=true 表示进程结束）
-        if (!view.webContents.isDestroyed()) {
-          void this.assemblyCoordinator.dispatchLifecycleEvent(view, 'PluginOut', true)
-        }
+        // 发送插件退出事件（isKill=true 表示进程结束），并给 renderer 一个短暂处理窗口。
+        this.dispatchPluginOutBeforeClose(view, true)
 
         // 如果是当前显示的插件，先隐藏
         if (this.currentPluginPath === pluginPath && this.mainWindow) {
@@ -1054,12 +1054,6 @@ export class PluginManager {
           this.currentPluginPath = null
           this.assemblyCoordinator.clearCurrentSession()
         }
-
-        // 销毁 webContents
-        if (!view.webContents.isDestroyed()) {
-          view.webContents.close()
-        }
-        this.assemblyCoordinator.clearDomReady(view.webContents.id)
 
         // 关闭该插件创建的所有窗口
         pluginWindowManager.closeByPlugin(pluginPath)
@@ -1080,10 +1074,16 @@ export class PluginManager {
       const detachedWindows = detachedWindowManager.getAllWindows()
       const isDetached = detachedWindows.some((w) => w.pluginPath === pluginPath)
       if (isDetached) {
+        const detachedView = detachedWindowManager.getViewByPlugin(pluginPath)
+        if (detachedView && !detachedView.webContents.isDestroyed()) {
+          void this.assemblyCoordinator.dispatchLifecycleEvent(detachedView, 'PluginOut', true)
+        }
         // 关闭该插件创建的所有独立窗口
         pluginWindowManager.closeByPlugin(pluginPath)
         // 关闭分离窗口（内部会销毁 webContents）
-        detachedWindowManager.closeByPlugin(pluginPath)
+        setTimeout(() => {
+          detachedWindowManager.closeByPlugin(pluginPath)
+        }, PLUGIN_OUT_GRACE_MS)
         this.pluginLastEnterState.delete(pluginPath)
         console.log('[Plugin] 分离窗口插件已终止:', pluginPath)
         return true
@@ -1120,13 +1120,7 @@ export class PluginManager {
     for (const { view, path } of this.pluginViews) {
       try {
         // 发送插件退出事件（isKill=true 表示进程结束）
-        if (!view.webContents.isDestroyed()) {
-          void this.assemblyCoordinator.dispatchLifecycleEvent(view, 'PluginOut', true)
-        }
-        if (!view.webContents.isDestroyed()) {
-          view.webContents.close()
-        }
-        this.assemblyCoordinator.clearDomReady(view.webContents.id)
+        this.dispatchPluginOutBeforeClose(view, true)
         // 关闭该插件创建的所有窗口
         pluginWindowManager.closeByPlugin(path)
         console.log('[Plugin] 插件已终止:', path)
@@ -1146,9 +1140,30 @@ export class PluginManager {
     this.pluginLastEnterState.clear()
 
     // 关闭所有分离窗口中的插件
-    detachedWindowManager.closeAll()
+    for (const detachedWindow of detachedWindowManager.getAllWindows()) {
+      if (!detachedWindow.view.webContents.isDestroyed()) {
+        void this.assemblyCoordinator.dispatchLifecycleEvent(detachedWindow.view, 'PluginOut', true)
+      }
+    }
+    setTimeout(() => {
+      detachedWindowManager.closeAll()
+    }, PLUGIN_OUT_GRACE_MS)
 
     console.log('[Plugin] killAllPlugins 完成')
+  }
+
+  private dispatchPluginOutBeforeClose(view: WebContentsView, isKill: boolean): void {
+    const webContents = view.webContents
+    if (webContents.isDestroyed()) return
+
+    const webContentsId = webContents.id
+    void this.assemblyCoordinator.dispatchLifecycleEvent(view, 'PluginOut', isKill)
+    setTimeout(() => {
+      if (!webContents.isDestroyed()) {
+        webContents.close()
+      }
+      this.assemblyCoordinator.clearDomReady(webContentsId)
+    }, PLUGIN_OUT_GRACE_MS)
   }
 
   /**
