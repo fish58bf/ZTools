@@ -6,7 +6,6 @@ import { promisify } from 'util'
 import { GLOBAL_SCROLLBAR_CSS } from '../../core/globalStyles'
 import { screenCapture } from '../../core/screenCapture'
 import windowManager from '../../managers/windowManager'
-import webSearchAPI from './webSearch'
 import databaseAPI from '../shared/database'
 import { ColorPicker } from '../../core/native/index.js'
 import { getExplorerFolderPathFromWindow } from '../../utils/common'
@@ -165,11 +164,11 @@ export async function executeSystemCommand(
 
     case 'search':
     case 'bing-search':
-      // 旧的硬编码搜索已迁移到网页快开，保留向后兼容
+      // 旧的硬编码搜索指令，保留向后兼容
       if (command === 'search') {
-        return handleWebSearch(ctx, param, 'https://www.baidu.com/s?wd={q}', '百度搜索')
+        return handleTemplateSearch(ctx, param, 'https://www.baidu.com/s?wd={q}', '百度搜索')
       }
-      return handleWebSearch(ctx, param, 'https://www.bing.com/search?q={q}', '必应搜索')
+      return handleTemplateSearch(ctx, param, 'https://www.bing.com/search?q={q}', '必应搜索')
 
     case 'open-url':
       return handleOpenUrl(ctx, param)
@@ -196,10 +195,6 @@ export async function executeSystemCommand(
       return handleAddToWakeupBlacklist(ctx)
 
     default:
-      // 处理网页快开搜索引擎 (web-search-{id})
-      if (command.startsWith('web-search-')) {
-        return handleDynamicWebSearch(ctx, param, command)
-      }
       return { success: false, error: `Unknown system command: ${command}` }
   }
 
@@ -254,7 +249,7 @@ function handleClearHistory(ctx: SystemCommandContext): any {
   }
 }
 
-async function handleWebSearch(
+async function handleTemplateSearch(
   ctx: SystemCommandContext,
   param: any,
   urlTemplate: string,
@@ -270,22 +265,6 @@ async function handleWebSearch(
     return { success: true }
   }
   return { success: false, error: '缺少搜索关键词' }
-}
-
-async function handleDynamicWebSearch(
-  ctx: SystemCommandContext,
-  param: any,
-  featureCode: string
-): Promise<any> {
-  console.log('[SystemCmd] 执行网页快开搜索:', featureCode, param)
-  const engine = await webSearchAPI.getEngineByFeatureCode(featureCode)
-  if (!engine) {
-    return { success: false, error: '未找到搜索引擎配置' }
-  }
-  if (engine.type === 'webpage') {
-    return handleOpenWebpage(ctx, engine.url, engine.name)
-  }
-  return handleWebSearch(ctx, param, engine.url, engine.name)
 }
 
 async function handleOpenWebpage(

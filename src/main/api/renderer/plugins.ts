@@ -9,7 +9,6 @@ import lmdbInstance from '../../core/lmdb/lmdbInstance'
 import windowManager from '../../managers/windowManager'
 import { httpGet } from '../../utils/httpRequest.js'
 import { pluginFeatureAPI } from '../plugin/feature'
-import webSearchAPI from './webSearch'
 import databaseAPI from '../shared/database'
 import { PluginDevProjectsAPI } from './pluginDevProjects'
 import { PluginInstallerAPI } from './pluginInstaller'
@@ -305,16 +304,10 @@ export class PluginsAPI {
       const data = databaseAPI.dbGet('plugins')
       const plugins = data || []
 
-      // 合并动态 features 和网页快开搜索引擎
-      const webSearchFeatures = await webSearchAPI.getSearchEngineFeatures()
+      // 合并动态 features
       for (const plugin of plugins) {
         const dynamicFeatures = pluginFeatureAPI.loadDynamicFeatures(plugin.name)
         plugin.features = [...(plugin.features || []), ...dynamicFeatures]
-
-        // 将网页快开搜索引擎作为系统插件的动态 features
-        if (plugin.name === 'system' && webSearchFeatures.length > 0) {
-          plugin.features = [...plugin.features, ...webSearchFeatures]
-        }
 
         // 处理插件 logo 路径
         if (plugin.logo) {

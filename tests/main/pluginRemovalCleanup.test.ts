@@ -57,12 +57,6 @@ vi.mock('../../src/main/api/plugin/feature', () => ({
   }
 }))
 
-vi.mock('../../src/main/api/renderer/webSearch', () => ({
-  default: {
-    getSearchEngineFeatures: vi.fn(async () => [])
-  }
-}))
-
 vi.mock('../../src/main/core/lmdb/lmdbInstance', () => ({
   default: {
     allDocs: vi.fn(() => []),

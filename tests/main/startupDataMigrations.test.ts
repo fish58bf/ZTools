@@ -19,71 +19,83 @@ vi.mock('../../src/main/core/internalPlugins.js', () => ({
   isBundledInternalPlugin: vi.fn(() => false)
 }))
 
-import { migrateWebSearchEngineTypes } from '../../src/main/core/startupDataMigrations'
+import { cleanupLegacyWebSearchReferences } from '../../src/main/core/startupDataMigrations'
 
 describe('startupDataMigrations', () => {
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
-  it('migrates legacy web search engines to typed search entries', () => {
-    mockDbGet.mockReturnValue([
-      {
-        id: 'legacy',
-        name: 'Legacy',
-        url: 'https://example.com?q={q}',
-        icon: ''
-      },
-      {
-        id: 'webpage',
-        name: 'Webpage',
-        url: 'https://example.com/',
-        icon: '',
-        enabled: false,
-        type: 'webpage',
-        keyword: 'example'
-      }
+  it('removes legacy web search command references from flat command lists', () => {
+    const stores: Record<string, any[]> = {
+      'command-history': [
+        { path: '/system', type: 'plugin', featureCode: 'web-search-history' },
+        { path: '/system', type: 'plugin', featureCode: 'clear' }
+      ],
+      'pinned-commands': [
+        { path: '/system', type: 'plugin', featureCode: 'web-search-pinned' },
+        { path: '/apps/foo', type: 'direct' }
+      ],
+      'command-usage-stats': [
+        { path: '/system', type: 'plugin', featureCode: 'web-search-stats', useCount: 3 },
+        { path: '/system', type: 'plugin', featureCode: 'clear', useCount: 1 }
+      ],
+      'cached-commands': [
+        { path: '/system', type: 'plugin', featureCode: 'web-search-cached' },
+        { path: '/system', type: 'plugin', featureCode: 'reboot' }
+      ],
+      'super-panel-pinned': []
+    }
+    mockDbGet.mockImplementation((key: string) => stores[key] || [])
+
+    cleanupLegacyWebSearchReferences()
+
+    expect(mockDbPut).toHaveBeenCalledWith('command-history', [
+      { path: '/system', type: 'plugin', featureCode: 'clear' }
     ])
-
-    migrateWebSearchEngineTypes()
-
-    expect(mockDbPut).toHaveBeenCalledWith('web-search-engines', [
-      {
-        id: 'legacy',
-        name: 'Legacy',
-        url: 'https://example.com?q={q}',
-        icon: '',
-        type: 'search',
-        enabled: true,
-        keyword: ''
-      },
-      {
-        id: 'webpage',
-        name: 'Webpage',
-        url: 'https://example.com/',
-        icon: '',
-        enabled: false,
-        type: 'webpage',
-        keyword: 'example'
-      }
+    expect(mockDbPut).toHaveBeenCalledWith('pinned-commands', [
+      { path: '/apps/foo', type: 'direct' }
+    ])
+    expect(mockDbPut).toHaveBeenCalledWith('command-usage-stats', [
+      { path: '/system', type: 'plugin', featureCode: 'clear', useCount: 1 }
+    ])
+    expect(mockDbPut).toHaveBeenCalledWith('cached-commands', [
+      { path: '/system', type: 'plugin', featureCode: 'reboot' }
     ])
   })
 
-  it('does not rewrite already migrated web search data', () => {
-    mockDbGet.mockReturnValue([
-      {
-        id: 'search',
-        name: 'Search',
-        url: 'https://example.com?q={q}',
-        icon: '',
-        enabled: true,
-        type: 'search',
-        keyword: ''
-      }
+  it('removes legacy web search commands from super panel folders', () => {
+    const stores: Record<string, any[]> = {
+      'command-history': [],
+      'pinned-commands': [],
+      'command-usage-stats': [],
+      'cached-commands': [],
+      'super-panel-pinned': [
+        {
+          id: 'folder-1',
+          name: 'Folder',
+          isFolder: true,
+          items: [
+            { path: '/system', type: 'plugin', featureCode: 'web-search-nested' },
+            { path: '/system', type: 'plugin', featureCode: 'clear' }
+          ]
+        },
+        {
+          id: 'folder-2',
+          name: 'Empty Folder',
+          isFolder: true,
+          items: [{ path: '/system', type: 'plugin', featureCode: 'web-search-only' }]
+        },
+        { path: '/system', type: 'plugin', featureCode: 'web-search-top' }
+      ]
+    }
+    mockDbGet.mockImplementation((key: string) => stores[key] || [])
+
+    cleanupLegacyWebSearchReferences()
+
+    expect(mockDbPut).toHaveBeenCalledTimes(1)
+    expect(mockDbPut).toHaveBeenCalledWith('super-panel-pinned', [
+      { path: '/system', type: 'plugin', featureCode: 'clear' }
     ])
-
-    migrateWebSearchEngineTypes()
-
-    expect(mockDbPut).not.toHaveBeenCalled()
   })
 })

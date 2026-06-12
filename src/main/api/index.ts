@@ -16,7 +16,6 @@ import settingsAPI from './renderer/settings'
 import syncAPI from './renderer/sync'
 import systemAPI from './renderer/system'
 import { systemSettingsAPI } from './renderer/systemSettings'
-import webSearchAPI from './renderer/webSearch'
 import windowAPI from './renderer/window'
 
 // 插件专用API
@@ -104,7 +103,6 @@ class APIManager {
     systemSettingsAPI.init()
     syncAPI.init(mainWindow)
     localShortcutsAPI.init(mainWindow)
-    webSearchAPI.init()
 
     // 初始化插件 API 统一分发器（必须在插件 API 初始化之前）
     initPluginApiDispatcher()
@@ -324,9 +322,7 @@ class APIManager {
     cmdName: string
   ): Promise<{ feature: any; cmdLabel: string; cmdType: string } | null> {
     const dynamicFeatures = pluginFeatureAPI.loadDynamicFeatures(plugin.name)
-    const webSearchFeatures =
-      plugin.name === 'system' ? await webSearchAPI.getSearchEngineFeatures() : []
-    const allFeatures = [...(plugin.features || []), ...dynamicFeatures, ...webSearchFeatures]
+    const allFeatures = [...(plugin.features || []), ...dynamicFeatures]
 
     for (const feature of allFeatures) {
       if (feature.cmds && Array.isArray(feature.cmds)) {

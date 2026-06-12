@@ -1097,18 +1097,6 @@ window.ztools = {
         await electron.ipcRenderer.invoke('internal:ai-models-delete', modelId)
     },
 
-    // ==================== 网页快开 API ====================
-    webSearch: {
-      getAll: async () => await electron.ipcRenderer.invoke('internal:web-search-get-all'),
-      add: async (engine) => await electron.ipcRenderer.invoke('internal:web-search-add', engine),
-      update: async (engine) =>
-        await electron.ipcRenderer.invoke('internal:web-search-update', engine),
-      delete: async (engineId) =>
-        await electron.ipcRenderer.invoke('internal:web-search-delete', engineId),
-      fetchFavicon: async (url) =>
-        await electron.ipcRenderer.invoke('internal:web-search-fetch-favicon', url)
-    },
-
     // ==================== 悬浮球 API ====================
     setFloatingBallEnabled: async (enabled) =>
       await electron.ipcRenderer.invoke('floating-ball:set-enabled', enabled),

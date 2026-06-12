@@ -91,17 +91,6 @@ const homeRoutes: MenuRouterItemType[] = [
     }
   },
   {
-    path: '/webSearch',
-    name: 'WebSearch',
-    component: () => import('@/views/WebSearchSetting/WebSearchSetting.vue'),
-    meta: {
-      menu: {
-        label: '网页快开',
-        icon: 'i-z-search'
-      }
-    }
-  },
-  {
     path: '/data',
     name: 'Data',
     component: () => import('@/views/DataSetting/DataSetting.vue'),
