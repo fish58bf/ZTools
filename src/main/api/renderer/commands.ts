@@ -301,13 +301,16 @@ export class AppsAPI {
     const plugin = this.getPluginsFromDB().find((p: any) => p.path === appPath)
     const effectiveName = plugin?.name
     // 检查是否配置为自动分离
-    let shouldAutoDetach = false
+    let shouldAutoDetach = true //默认为分离模式
     if (pluginConfig && effectiveName) {
       try {
         const autoDetachPlugins: string[] = databaseAPI.dbGet('autoDetachPlugin') || []
         if (Array.isArray(autoDetachPlugins) && autoDetachPlugins.includes(effectiveName)) {
           shouldAutoDetach = true
           console.log(`插件 ${effectiveName} 配置为自动分离，直接在独立窗口中创建`)
+        }else if (pluginConfig.autoDetach) {
+          shouldAutoDetach = false
+          console.log(`插件 ${effectiveName} 配置为非分离`)
         }
       } catch (error) {
         console.error('[Commands] 检查自动分离配置失败:', error)
