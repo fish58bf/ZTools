@@ -9,7 +9,6 @@ import lmdbInstance from '../../core/lmdb/lmdbInstance'
 import windowManager from '../../managers/windowManager'
 import { httpGet } from '../../utils/httpRequest.js'
 import { pluginFeatureAPI } from '../plugin/feature'
-import webSearchAPI from './webSearch'
 import databaseAPI from '../shared/database'
 import { PluginDevProjectsAPI } from './pluginDevProjects'
 import { PluginInstallerAPI } from './pluginInstaller'
@@ -18,9 +17,20 @@ import {
   getPluginDataPrefix,
   isDevelopmentPluginName
 } from '../../../shared/pluginRuntimeNamespace'
+import {
+  ENABLED_MAIN_PUSH_PLUGINS_KEY,
+  normalizeConfigList,
+  removePluginNameFromSettingList
+} from '../../../shared/pluginSettings'
 
 // 插件目录
 const DISABLED_PLUGINS_KEY = 'disabled-plugins'
+const PLUGIN_NAME_SETTING_KEYS = [
+  'outKillPlugin',
+  'autoDetachPlugin',
+  'autoStartPlugin',
+  ENABLED_MAIN_PUSH_PLUGINS_KEY
+]
 
 export interface DeletePluginOptions {
   deleteData?: boolean
@@ -294,16 +304,10 @@ export class PluginsAPI {
       const data = databaseAPI.dbGet('plugins')
       const plugins = data || []
 
-      // 合并动态 features 和网页快开搜索引擎
-      const webSearchFeatures = await webSearchAPI.getSearchEngineFeatures()
+      // 合并动态 features
       for (const plugin of plugins) {
         const dynamicFeatures = pluginFeatureAPI.loadDynamicFeatures(plugin.name)
         plugin.features = [...(plugin.features || []), ...dynamicFeatures]
-
-        // 将网页快开搜索引擎作为系统插件的动态 features
-        if (plugin.name === 'system' && webSearchFeatures.length > 0) {
-          plugin.features = [...plugin.features, ...webSearchFeatures]
-        }
 
         // 处理插件 logo 路径
         if (plugin.logo) {
@@ -474,6 +478,7 @@ export class PluginsAPI {
 
       if (options.deleteData !== false) {
         await databaseAPI.clearPluginData(pluginInfo.name)
+        this.removePluginNameConfigs(PLUGIN_NAME_SETTING_KEYS, pluginInfo.name)
       }
 
       // 删除禁用插件标识
@@ -499,6 +504,45 @@ export class PluginsAPI {
       return { success: true }
     } catch (error: unknown) {
       console.error('[Plugins] 删除插件失败:', error)
+      return { success: false, error: error instanceof Error ? error.message : '未知错误' }
+    }
+  }
+
+  private removePluginNameConfigs(keys: string[], pluginName: string): void {
+    for (const key of keys) {
+      const current = databaseAPI.dbGet(key)
+      const normalized = normalizeConfigList(current)
+      const next = removePluginNameFromSettingList(normalized, pluginName)
+      if (next.length !== normalized.length) {
+        databaseAPI.dbPut(key, next)
+      }
+    }
+  }
+
+  public async setPluginMainPushEnabled(
+    pluginName: string,
+    enabled: boolean
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const enabledPluginNames = new Set(
+        normalizeConfigList(databaseAPI.dbGet(ENABLED_MAIN_PUSH_PLUGINS_KEY))
+      )
+      const isCurrentlyEnabled = enabledPluginNames.has(pluginName)
+      if (isCurrentlyEnabled === enabled) {
+        return { success: true }
+      }
+
+      if (enabled) {
+        enabledPluginNames.add(pluginName)
+      } else {
+        enabledPluginNames.delete(pluginName)
+      }
+
+      databaseAPI.dbPut(ENABLED_MAIN_PUSH_PLUGINS_KEY, [...enabledPluginNames])
+      this.notifyPluginsChanged()
+      return { success: true }
+    } catch (error: unknown) {
+      console.error('[Plugins] 更新插件 mainPush 状态失败:', error)
       return { success: false, error: error instanceof Error ? error.message : '未知错误' }
     }
   }

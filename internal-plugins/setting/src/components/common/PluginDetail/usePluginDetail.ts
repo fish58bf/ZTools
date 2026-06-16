@@ -2,6 +2,11 @@ import { marked } from 'marked'
 import { computed, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
 import { useToast } from '@/components'
 import type { DocItem, PluginItem, PluginUninstallOptions, TabId, TabItem } from './types'
+import {
+  ENABLED_MAIN_PUSH_PLUGINS_KEY,
+  normalizeConfigList,
+  isMainPushPluginEnabled
+} from '@shared/pluginSettings'
 
 // 配置 marked
 marked.setOptions({
@@ -26,17 +31,17 @@ export function usePluginDetail(options: UsePluginDetailOptions) {
   const isAutoKill = ref(false)
   const isAutoDetach = ref(false)
   const isAutoStart = ref(false)
+  const isMainPushEnabled = ref(false)
 
   // 当前详情页插件的有效名称（已包含 __dev 后缀）
   const currentPluginName = computed(() => plugin.value.name || null)
-
-  /** 解析配置列表，兼容旧式 { pluginName, source } 和新式 string */
-  function normalizeConfigList(data: unknown): string[] {
-    if (!Array.isArray(data)) return []
-    return data
-      .map((item) => (typeof item === 'string' ? item : (item?.pluginName ?? '')))
-      .filter(Boolean)
-  }
+  const pluginHasMainPush = computed(() =>
+    Boolean(
+      plugin.value.features?.some(
+        (feature: any) => feature?.mainPush && Array.isArray(feature.cmds)
+      )
+    )
+  )
 
   /** 切换字符串列表中的某项 */
   function toggleInList(list: string[], name: string): string[] {
@@ -82,6 +87,18 @@ export function usePluginDetail(options: UsePluginDetailOptions) {
       }
     } catch (err) {
       console.debug('未找到 autoStartPlugin 配置', err)
+    }
+
+    try {
+      const mainPushData = await window.ztools.internal.dbGet(ENABLED_MAIN_PUSH_PLUGINS_KEY)
+      if (currentPluginName.value) {
+        isMainPushEnabled.value = isMainPushPluginEnabled(
+          currentPluginName.value,
+          normalizeConfigList(mainPushData)
+        )
+      }
+    } catch (err) {
+      console.debug('未找到 enabled-main-push-plugin 配置', err)
     }
   }
 
@@ -134,6 +151,21 @@ export function usePluginDetail(options: UsePluginDetailOptions) {
     list = toggleInList(list, currentPluginName.value)
     await window.ztools.internal.dbPut('autoStartPlugin', list)
     isAutoStart.value = list.includes(currentPluginName.value)
+  }
+
+  async function toggleMainPushEnabled(): Promise<void> {
+    if (!currentPluginName.value) return
+
+    const nextEnabled = !isMainPushEnabled.value
+    const result = await window.ztools.internal.setPluginMainPushEnabled(
+      currentPluginName.value,
+      nextEnabled
+    )
+    if (result.success) {
+      isMainPushEnabled.value = nextEnabled
+    } else {
+      error(`更新搜索栏推送状态失败: ${result.error || '未知错误'}`)
+    }
   }
 
   // Tab 状态
@@ -493,11 +525,14 @@ export function usePluginDetail(options: UsePluginDetailOptions) {
     isAutoKill,
     isAutoDetach,
     isAutoStart,
+    isMainPushEnabled,
+    pluginHasMainPush,
     currentPluginName,
     toggleSettingsDropdown,
     toggleAutoKill,
     toggleAutoDetach,
     toggleAutoStart,
+    toggleMainPushEnabled,
 
     // Tab 状态
     activeTab,

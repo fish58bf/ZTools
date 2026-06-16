@@ -26,9 +26,28 @@ interface UwpAppInfo {
   installLocation: string
 }
 
+export interface FileLocationWindowInfo {
+  platform?: 'win32' | 'darwin'
+  kind?: 'windows-explorer' | 'windows-file-dialog' | 'mac-finder' | 'mac-file-dialog'
+  preciseTarget?: boolean
+  hwnd?: number
+  windowId?: number
+  finderId?: number
+  pid?: number
+  bundleId?: string
+  app?: string
+  title?: string
+  className?: string
+  axRole?: string
+  axSubrole?: string
+  path?: string
+  url?: string
+}
+
 interface NativeAddon {
   startMonitor: (callback: () => void) => void
   stopMonitor: () => void
+  setClipboardPollingBoost?: (intervalMs: number, durationMs: number) => void
   startWindowMonitor: (callback: (windowInfo: WindowInfo) => void) => void
   stopWindowMonitor: () => void
   getActiveWindow: () => ActiveWindowResult | null
@@ -60,16 +79,37 @@ interface NativeAddon {
   unicodeType: (segment: string) => boolean
   /** Windows: 通过 COM IShellWindows 查询指定窗口句柄对应的 Explorer 文件夹路径 */
   getExplorerFolderPath: (hwnd: number) => string | null
+  /** Windows/macOS: 获取文件管理器窗口 */
+  getAllExplorerWindows: () => Array<FileLocationWindowInfo | string>
+  /** Windows/macOS: 设置文件管理器或文件选择对话框地址栏路径 */
+  setAddressBar: (identifier: number | string | FileLocationWindowInfo, address: string) => boolean
+  /** Windows: 判断窗口是否是可安全修改地址栏的文件定位窗口 */
+  isFileLocationWindow?: (hwnd: number) => boolean
   /** Windows: 读取指定浏览器窗口的当前 URL，结果通过 callback 返回 */
   readBrowserWindowUrl: (
     browserName: string,
     hwnd: number,
     callback: (url: string | null) => void
   ) => void
+  /**
+   * 获取当前选中的内容（支持文本、文件、图像）
+   * 实现方式：
+   * - Windows: 优先使用 UI Automation API，回退到剪贴板方法
+   * - macOS: 使用模拟复制方法（Cmd+C）
+   * 自动暂停 clipboardMonitor，防止误触发监听
+   */
+  getSelectedContent: () => Array<
+    | { type: 'text'; data: string }
+    | { type: 'file'; data: string[] }
+    | { type: 'image'; data: string }
+  >
 }
 
 interface WindowInfo {
   app: string // 应用名称（如 "Finder.app"）
+  platform?: 'win32' | 'darwin'
+  kind?: FileLocationWindowInfo['kind']
+  preciseTarget?: boolean
   bundleId?: string // macOS 独有
   pid?: number // 进程ID (macOS 和 Windows 都有)
   title?: string // 窗口标题
@@ -80,6 +120,12 @@ interface WindowInfo {
   appPath?: string // 应用路径
   className?: string // Windows 窗口类名（用于区分 CabinetWClass/Progman/WorkerW 等）
   hwnd?: number // Windows 窗口句柄（用于 COM 查询 Explorer 路径）
+  windowId?: number
+  finderId?: number
+  axRole?: string
+  axSubrole?: string
+  path?: string
+  url?: string
 }
 
 interface ActiveWindowResult {
@@ -168,6 +214,18 @@ export class ClipboardMonitor {
    */
   get isMonitoring(): boolean {
     return this._isMonitoring
+  }
+
+  /**
+   * macOS: 临时提升剪贴板轮询频率（仅在当前进程内有效）
+   * @param intervalMs - 轮询间隔（毫秒），建议设置为 20-50ms
+   * @param durationMs - 持续时间（毫秒）
+   */
+  static setClipboardPollingBoost(intervalMs: number, durationMs: number): void {
+    const boostFn = (addon as NativeAddon).setClipboardPollingBoost
+    if (platform === 'darwin' && typeof boostFn === 'function') {
+      boostFn(intervalMs, durationMs)
+    }
   }
 
   /**
@@ -424,6 +482,66 @@ export class WindowManager {
   }
 
   /**
+   * Windows/macOS: 获取所有文件管理器窗口
+   * @returns 文件管理器窗口列表
+   */
+  static getAllExplorerWindows(): Array<FileLocationWindowInfo | string> {
+    if (platform !== 'win32' && platform !== 'darwin') {
+      throw new Error('getAllExplorerWindows is only available on Windows and macOS')
+    }
+    return (addon as NativeAddon).getAllExplorerWindows()
+  }
+
+  static isFileLocationWindow(hwnd: number): boolean {
+    if (platform !== 'win32') {
+      throw new Error('isFileLocationWindow is only available on Windows')
+    }
+    if (typeof hwnd !== 'number' || !Number.isFinite(hwnd) || hwnd <= 0) {
+      throw new TypeError('hwnd must be a positive number')
+    }
+    return Boolean((addon as NativeAddon).isFileLocationWindow?.(hwnd))
+  }
+
+  /**
+   * Windows/macOS: 设置文件管理器或文件选择对话框地址栏路径
+   * @param target 目标窗口标识或窗口信息
+   * @param address 要跳转的路径或地址
+   * @returns 是否设置成功
+   */
+  static setAddressBar(target: number | string | FileLocationWindowInfo, address: string): boolean {
+    if (platform !== 'win32' && platform !== 'darwin') {
+      throw new Error('setAddressBar is only available on Windows and macOS')
+    }
+    if (typeof address !== 'string' || address.trim() === '') {
+      throw new TypeError('address must be a non-empty string')
+    }
+
+    const identifier =
+      typeof target === 'object' && target !== null
+        ? platform === 'darwin'
+          ? target
+          : target.hwnd
+        : target
+
+    if (platform === 'win32') {
+      if (typeof identifier !== 'number' || !Number.isFinite(identifier) || identifier <= 0) {
+        throw new TypeError('target must include a valid hwnd')
+      }
+    } else if (typeof identifier === 'object' && identifier !== null) {
+      if (!identifier.preciseTarget) {
+        throw new TypeError('target must include precise macOS window identity')
+      }
+    } else if (
+      (typeof identifier !== 'number' || !Number.isFinite(identifier) || identifier <= 0) &&
+      (typeof identifier !== 'string' || identifier.trim() === '')
+    ) {
+      throw new TypeError('target must include a valid bundleId or pid')
+    }
+
+    return Boolean((addon as NativeAddon).setAddressBar(identifier, address))
+  }
+
+  /**
    * Windows: 读取指定浏览器窗口的当前 URL
    * @param browserName 浏览器标识（如 chrome/msedge/firefox）
    * @param hwnd 窗口句柄（从 WindowInfo.hwnd 获取）
@@ -525,6 +643,49 @@ export class WindowManager {
       throw new TypeError('x and y must be finite numbers')
     }
     return (addon as NativeAddon).simulateMouseRightClick(x, y)
+  }
+
+  /**
+   * 获取当前选中的内容（支持文本、文件、图像）
+   *
+   * 实现方式：
+   * - Windows: 优先使用 UI Automation API，回退到剪贴板方法（适用于 Cursor/VS Code 等编辑器）
+   * - macOS: 使用模拟复制方法（Cmd+C）
+   *
+   * 在模拟复制时会自动暂停内部的 clipboardMonitor，防止误触发监听自身发起的事件
+   *
+   * @returns {Array<{type: string, data: any}>} 选中内容数组
+   * - type: 'text' | 'file' | 'image'
+   * - data: 根据类型不同：
+   *   - text: 字符串
+   *   - file: 文件路径字符串数组
+   *   - image: base64 编码的 PNG 图像（带 format 和 encoding 字段）
+   *
+   * @example
+   * const contents = WindowManager.getSelectedContent();
+   * contents.forEach(item => {
+   *   switch (item.type) {
+   *     case 'text':
+   *       console.log('Selected text:', item.data);
+   *       break;
+   *     case 'file':
+   *       console.log('Selected files:', item.data);
+   *       break;
+   *     case 'image':
+   *       console.log('Selected image (base64):', item.data.substring(0, 50) + '...');
+   *       break;
+   *   }
+   * });
+   */
+  static getSelectedContent(): Array<
+    | { type: 'text'; data: string }
+    | { type: 'file'; data: string[] }
+    | { type: 'image'; data: string }
+  > {
+    if (platform === 'linux') {
+      return []
+    }
+    return (addon as NativeAddon).getSelectedContent()
   }
 }
 

@@ -1,28 +1,30 @@
-# 2.4.1
+# 2.6.1
 
 ## 新功能 (Feat)
 
-- 新增 Linux 平台支持（应用启动、系统指令、窗口激活、arm64 构建）（PR [#398](../../pull/398)，感谢 [@YanqingZhang](https://github.com/YanqingZhang) 的贡献 🎉）
-- 支持插件内获取及订阅主题相关信息（PR [#415](../../pull/415)，感谢 [@Particaly](https://github.com/Particaly) 的贡献 🎉）
-- 新增前往文件夹功能
+- 插件详情新增「关闭搜索栏推送」开关，可按插件禁用搜索框推送结果（PR [#520](../../pull/520)，感谢 [@guopenghui](https://github.com/guopenghui) 的贡献 🎉）
+- 全局快捷键新增自动复制选中文本开关（PR [#521](../../pull/521)，感谢 [@Particaly](https://github.com/Particaly) 的贡献 🎉）
+- 插件市场 banner 和分类图标改为本地资源加载，减少远程资源依赖
+- 更新 Electron 版本
+- 更新内置原生模块
 
 ## 修复 (Fix)
 
-- 修复 Windows 插件目录被占用导致无法删除的问题（PR [#419](../../pull/419)，感谢 [@yg2224](https://github.com/yg2224) 的贡献 🎉）
-- 修复开发中插件热更新重载页面时错误地在浏览器打开页面的问题（PR [#418](../../pull/418)，感谢 [@Particaly](https://github.com/Particaly) 的贡献 🎉）
-- 修复首次启动托盘图标不显示的问题
-- 修复关闭插件视图时未同步关闭所有由该插件创建的独立窗口的问题
-- 修复插件升级流程，支持覆盖安装并保留插件数据
-- 修复插件创建的子窗口存储数据无命名空间前缀的问题
-- 修复 macOS 下双击 Option 键无法作为唤醒快捷键的问题
-- 修复某些情况下出现窗口叠层问题
-- 修复 node 加载路径错误导致 Windows / macOS 报错的问题
-- 修复搜索结果中应用别名与主名称重复显示的问题
-- 修复多屏场景下窗口显示错误问题
+- 修复位置位移窗口内部坍塌
+- 修复点击主窗口外原生菜单项目主窗口关闭
+- 修复插件打开系统文件对话框时主窗口被隐藏的问题（PR [#518](../../pull/518)，感谢 [@jn12-29](https://github.com/jn12-29) 的贡献 🎉）
+- 修复 Windows 下文件管理器成为前台窗口时当前窗口数据被错误切换的问题（PR [#517](../../pull/517)，感谢 [@Flinglin](https://github.com/Flinglin) 的贡献 🎉）
+- 修复 Windows「复制路径」系统指令在部分文件管理器窗口中无法匹配的问题（PR [#517](../../pull/517)，感谢 [@Flinglin](https://github.com/Flinglin) 的贡献 🎉）
+- 修复全局快捷键取词等待时间过长的问题（PR [#521](../../pull/521)，感谢 [@Particaly](https://github.com/Particaly) 的贡献 🎉）
+- 修复取词时文件优先级低于图片和文本的问题
+- 加强插件文件对话框期间的窗口 blur 处理，避免对话框关闭后窗口状态异常
 
 ## 优化 (Optimize)
 
-- 图标获取支持队列，提升并发获取性能
+- 优化插件市场默认地址配置
+- 优化全局快捷键取词流程，使用原生 `getSelectedContent` 替代剪贴板轮询
+- 优化 `getSelectedContent` 类型安全和防御性（PR [#525](../../pull/525)，感谢 [@pantao](https://github.com/pantao) 的贡献 🎉）
+- 增加插件搜索栏推送配置相关测试覆盖
 
 ## 重构 (Refactor)
 
@@ -30,6 +32,6 @@
 
 ## 其他 (Chore)
 
-无
+- 更新项目文档中的 Electron 版本说明
 
 ---

@@ -247,7 +247,7 @@ async function handleAutoCheckUpdateChange(): Promise<void> {
 
       <!-- 核心技术 -->
       <div class="about-techs">
-        <span class="tech-tag">Electron 38</span>
+        <span class="tech-tag">Electron 41</span>
         <span class="tech-tag">Vue 3</span>
         <span class="tech-tag">TypeScript</span>
         <span class="tech-tag">LMDB</span>

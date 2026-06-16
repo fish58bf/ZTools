@@ -28,7 +28,7 @@ _uTools 的开源实现 | 支持 macOS 和 Windows_
 - 🌍 **跨平台** - 原生支持 macOS 和 Windows，统一体验
 - 🔒 **数据隔离** - 插件数据独立存储，安全可靠
 - 🛠️ **开发友好** - 完整的 TypeScript 类型支持，热重载开发
-- ⚙️ **最新技术栈** - Electron 38.5 + Node 22.20 + Chrome 140
+- ⚙️ **最新技术栈** - Electron 41 + Node 24.15 + Chrome 146
 
 ## 📸 预览
 
@@ -249,7 +249,7 @@ ZTools 提供丰富的 API：
 
 ## 🛠️ 技术栈
 
-- **框架**: Electron 38 + Vue 3 + TypeScript
+- **框架**: Electron 41 + Vue 3 + TypeScript
 - **构建**: Vite + electron-vite
 - **数据库**: LMDB（高性能键值存储）
 - **状态管理**: Pinia

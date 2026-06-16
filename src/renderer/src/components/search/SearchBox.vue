@@ -217,6 +217,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { normalizeConfigList } from '@shared/pluginSettings'
 import { DEFAULT_AVATAR, useWindowStore } from '../../stores/windowStore'
 import AdaptiveIcon from '../common/AdaptiveIcon.vue'
 import UpdateIcon from './UpdateIcon.vue'
@@ -274,14 +275,6 @@ const placeholderText = computed(() => {
  */
 function getCurrentPluginName(): string | null {
   return windowStore.currentPlugin?.name ?? null
-}
-
-/** 解析配置列表，兼容旧式对象 */
-function normalizeConfigList(data: unknown): string[] {
-  if (!Array.isArray(data)) return []
-  return data
-    .map((item) => (typeof item === 'string' ? item : (item?.pluginName ?? '')))
-    .filter(Boolean)
 }
 
 /**

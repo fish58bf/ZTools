@@ -44,10 +44,13 @@ const {
   isAutoKill,
   isAutoDetach,
   isAutoStart,
+  isMainPushEnabled,
+  pluginHasMainPush,
   toggleSettingsDropdown,
   toggleAutoKill,
   toggleAutoDetach,
   toggleAutoStart,
+  toggleMainPushEnabled,
   // Tab
   activeTab,
   availableTabs,
@@ -102,6 +105,8 @@ function onSwitchTab(tabId: TabId): void {
         :is-auto-kill="isAutoKill"
         :is-auto-detach="isAutoDetach"
         :is-auto-start="isAutoStart"
+        :is-main-push-enabled="isMainPushEnabled"
+        :show-main-push-toggle="pluginHasMainPush"
         @open="emit('open')"
         @kill="emit('kill')"
         @open-folder="emit('open-folder')"
@@ -112,6 +117,7 @@ function onSwitchTab(tabId: TabId): void {
         @toggle-auto-kill="toggleAutoKill"
         @toggle-auto-detach="toggleAutoDetach"
         @toggle-auto-start="toggleAutoStart"
+        @toggle-main-push-enabled="toggleMainPushEnabled"
       />
     </template>
 

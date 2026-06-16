@@ -635,6 +635,55 @@ export class DatabaseAPI {
   /**
    * 清空指定插件的所有数据（供内部调用）
    */
+  private async _deletePluginDoc(
+    pluginName: string,
+    key: string
+  ): Promise<{ success: boolean; deletedCount?: number; error?: string }> {
+    try {
+      const target = this.resolvePluginDataTarget(pluginName)
+      if (!target) {
+        return { success: false, error: '插件标识无效' }
+      }
+
+      const docId = `${target.prefix}${key}`
+      let deletedCount = 0
+
+      const doc = lmdbInstance.get(docId)
+      if (doc) {
+        const result = lmdbInstance.remove(docId)
+        if (!result.ok) {
+          return { success: false, error: result.message || '删除文档失败' }
+        }
+        deletedCount++
+      }
+
+      const metaDb = lmdbInstance.getMetaDb()
+      if (metaDb.get(docId) !== undefined) {
+        metaDb.removeSync(docId)
+      }
+
+      const attachmentDb = lmdbInstance.getAttachmentDb()
+      const attachmentKey = `attachment:${docId}`
+      const attachmentMetaKey = `attachment-ext:${docId}`
+      if (attachmentDb.get(attachmentKey) !== undefined) {
+        attachmentDb.removeSync(attachmentKey)
+        deletedCount++
+      }
+      if (attachmentDb.get(attachmentMetaKey) !== undefined) {
+        attachmentDb.removeSync(attachmentMetaKey)
+      }
+
+      if (deletedCount === 0) {
+        return { success: false, error: '文档不存在' }
+      }
+
+      return { success: true, deletedCount }
+    } catch (error: unknown) {
+      console.error('[Database] 删除插件文档失败:', error)
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+
   private async _clearPluginData(
     pluginName: string
   ): Promise<{ success: boolean; deletedCount?: number; error?: string }> {
@@ -746,6 +795,16 @@ export class DatabaseAPI {
     key: string
   ): Promise<{ success: boolean; data?: any; type?: string; error?: string }> {
     return await this._getPluginDoc(pluginName, key)
+  }
+
+  /**
+   * 公共方法：删除指定插件的一条文档或附件
+   */
+  public async deletePluginDoc(
+    pluginName: string,
+    key: string
+  ): Promise<{ success: boolean; deletedCount?: number; error?: string }> {
+    return await this._deletePluginDoc(pluginName, key)
   }
 
   /**

@@ -2,6 +2,8 @@ import databaseAPI from '../api/shared/database.js'
 import { isDevelopmentPluginName, toDevPluginName } from '../../shared/pluginRuntimeNamespace.js'
 import { isBundledInternalPlugin } from './internalPlugins.js'
 
+const LEGACY_WEB_SEARCH_FEATURE_PREFIX = 'web-search-'
+
 /**
  * 将单个旧版 macOS .icns 图标 URL 迁移为直接使用 .app 路径的 ztools-icon URL
  */
@@ -57,6 +59,7 @@ function migrateLegacyMacAppIcons(items: any[]): boolean {
 export function runStartupDataMigrations(): void {
   migrateDevPluginNames()
   migrateVariantRefLists()
+  cleanupLegacyWebSearchReferences()
 
   if (process.platform !== 'darwin') return
 
@@ -140,6 +143,101 @@ function migrateDevPluginNames(): void {
  * 旧格式：[{ pluginName: 'demo', source: 'development' }, {pluginName: 'foo', source: 'installed'}, ...]
  * 新格式：['demo__dev', 'foo', ...]
  */
+function isLegacyWebSearchCommand(item: any): boolean {
+  return (
+    item &&
+    typeof item === 'object' &&
+    typeof item.featureCode === 'string' &&
+    item.featureCode.startsWith(LEGACY_WEB_SEARCH_FEATURE_PREFIX)
+  )
+}
+
+function filterLegacyWebSearchCommandList(items: any[]): { items: any[]; changed: boolean } {
+  const filtered = items.filter((item) => !isLegacyWebSearchCommand(item))
+  return {
+    items: filtered,
+    changed: filtered.length !== items.length
+  }
+}
+
+function filterLegacyWebSearchSuperPanelPinned(items: any[]): { items: any[]; changed: boolean } {
+  let changed = false
+  const nextItems: any[] = []
+
+  for (const item of items) {
+    if (isLegacyWebSearchCommand(item)) {
+      changed = true
+      continue
+    }
+
+    if (item?.isFolder && Array.isArray(item.items)) {
+      const filtered = filterLegacyWebSearchSuperPanelPinned(item.items)
+      if (filtered.changed) changed = true
+
+      if (filtered.items.length === 0) {
+        changed = true
+        continue
+      }
+
+      if (filtered.items.length === 1) {
+        changed = true
+        nextItems.push(filtered.items[0])
+        continue
+      }
+
+      nextItems.push(filtered.changed ? { ...item, items: filtered.items } : item)
+      continue
+    }
+
+    nextItems.push(item)
+  }
+
+  return { items: nextItems, changed }
+}
+
+/**
+ * 清理已移除的旧内置网页快开功能引用。
+ *
+ * 网页快开已迁移为插件实现，旧 system 插件动态 featureCode 形如 web-search-{id}。
+ * 这里仅清理历史、固定、使用统计和缓存里的旧引用，不删除 web-search-engines 原始配置数据。
+ */
+export function cleanupLegacyWebSearchReferences(): void {
+  const commandListKeys = [
+    'command-history',
+    'pinned-commands',
+    'command-usage-stats',
+    'cached-commands'
+  ]
+
+  for (const key of commandListKeys) {
+    try {
+      const data: any[] = databaseAPI.dbGet(key) || []
+      if (!Array.isArray(data)) continue
+
+      const result = filterLegacyWebSearchCommandList(data)
+      if (!result.changed) continue
+
+      databaseAPI.dbPut(key, result.items)
+      console.log(`[StartupMigration] 已清理旧网页快开引用: ${key}`)
+    } catch (error) {
+      console.error(`[StartupMigration] 清理旧网页快开引用失败: ${key}`, error)
+    }
+  }
+
+  try {
+    const data: any[] = databaseAPI.dbGet('super-panel-pinned') || []
+    if (!Array.isArray(data)) return
+
+    const result = filterLegacyWebSearchSuperPanelPinned(data)
+    if (!result.changed) return
+
+    databaseAPI.dbPut('super-panel-pinned', result.items)
+    console.log('[StartupMigration] 已清理旧网页快开引用: super-panel-pinned')
+  } catch (error) {
+    console.error('[StartupMigration] 清理旧网页快开引用失败: super-panel-pinned', error)
+  }
+}
+
 function migrateVariantRefLists(): void {
   const configKeys = ['autoStartPlugin', 'outKillPlugin', 'autoDetachPlugin']
 

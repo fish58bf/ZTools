@@ -71,8 +71,25 @@ class AppWatcher {
     }
 
     if (process.platform === 'darwin') {
-      // macOS: 只监听 .app 结尾的目录
-      return !basename.endsWith('.app')
+      // .app 目录始终监听（无论位于顶层还是 PWA 容器内）
+      if (basename.endsWith('.app')) {
+        return false
+      }
+
+      // 放行 watch 根目录下的「顶层子目录」（如 Chrome Apps.localized / Edge Apps.localized），
+      // 让 chokidar 下钻一层从而能检测到容器内 PWA 的增删。
+      // 仅放行目录、不放行文件（如 .DS_Store）；容器内部 / .app 内部仍只关心 .app。
+      const parent = path.dirname(filePath)
+      if (watchPaths.includes(parent)) {
+        try {
+          return !fs.statSync(filePath).isDirectory()
+        } catch {
+          // stat 失败（如 unlink 事件时目录已不存在）：不忽略，交由上层按 .app 后缀判断
+          return false
+        }
+      }
+
+      return true
     }
 
     return true

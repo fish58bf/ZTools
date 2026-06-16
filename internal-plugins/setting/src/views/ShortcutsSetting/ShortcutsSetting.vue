@@ -29,6 +29,7 @@ interface GlobalShortcut {
   enabled: boolean
   configurable?: boolean
   configKey?: BuiltInShortcutKey
+  autoCopy?: boolean
 }
 
 type BuiltInShortcutKey = 'search' | 'closePlugin' | 'killPlugin'
@@ -324,7 +325,10 @@ async function saveAliasMappings(nextStore: CommandAliasStore): Promise<boolean>
 async function loadGlobalShortcuts(): Promise<void> {
   try {
     const data = await window.ztools.internal.dbGet('global-shortcuts')
-    globalShortcuts.value = data || []
+    globalShortcuts.value = (data || []).map((shortcut: any) => ({
+      ...shortcut,
+      autoCopy: shortcut.autoCopy ?? false // 默认禁用
+    }))
   } catch (err) {
     console.error('加载全局快捷键失败:', err)
   }
@@ -670,6 +674,7 @@ async function handleSaveGlobalShortcut(
     }
 
     const oldShortcut = editingShortcut.value.shortcut
+    const autoCopy = editingShortcut.value.autoCopy ?? false // 保留原有 autoCopy 配置
 
     try {
       if (oldShortcut !== recordedShortcut) {
@@ -678,7 +683,8 @@ async function handleSaveGlobalShortcut(
 
       const result = await window.ztools.internal.registerGlobalShortcut(
         recordedShortcut,
-        targetCommand
+        targetCommand,
+        autoCopy
       )
 
       if (result.success) {
@@ -686,6 +692,7 @@ async function handleSaveGlobalShortcut(
         if (index >= 0) {
           globalShortcuts.value[index].shortcut = recordedShortcut
           globalShortcuts.value[index].target = targetCommand
+          // autoCopy 保持不变
         }
 
         await saveGlobalShortcuts()
@@ -695,7 +702,8 @@ async function handleSaveGlobalShortcut(
         if (oldShortcut !== recordedShortcut) {
           await window.ztools.internal.registerGlobalShortcut(
             oldShortcut,
-            editingShortcut.value.target
+            editingShortcut.value.target,
+            autoCopy
           )
         }
         error(`快捷键注册失败: ${result.error}`)
@@ -704,7 +712,8 @@ async function handleSaveGlobalShortcut(
       if (oldShortcut !== recordedShortcut) {
         await window.ztools.internal.registerGlobalShortcut(
           oldShortcut,
-          editingShortcut.value.target
+          editingShortcut.value.target,
+          autoCopy
         )
       }
       console.error('更新快捷键失败:', err)
@@ -723,7 +732,8 @@ async function handleSaveGlobalShortcut(
     id: Date.now().toString(),
     shortcut: recordedShortcut,
     target: targetCommand,
-    enabled: true
+    enabled: true,
+    autoCopy: false // 新建快捷键默认禁用自动复制
   }
 
   globalShortcuts.value.push(newShortcut)
@@ -732,7 +742,8 @@ async function handleSaveGlobalShortcut(
   try {
     const result = await window.ztools.internal.registerGlobalShortcut(
       recordedShortcut,
-      targetCommand
+      targetCommand,
+      false // 新建快捷键默认禁用自动复制
     )
     if (result.success) {
       success('快捷键添加成功!')
@@ -877,6 +888,70 @@ async function handleDelete(id: string): Promise<void> {
     error(`删除快捷键失败: ${err.message || '未知错误'}`)
   } finally {
     isDeleting.value = false
+  }
+}
+
+// 处理自动复制开关切换
+async function handleAutoCopyToggle(shortcut: any, event: Event): Promise<void> {
+  console.log('[AutoCopy] 开关切换触发', { shortcut, event })
+
+  const target = event.target as HTMLInputElement | null
+  if (!target) {
+    console.error('[AutoCopy] 无法获取 target 元素')
+    return
+  }
+
+  const newAutoCopy = target.checked
+  console.log('[AutoCopy] 新状态:', newAutoCopy, '旧状态:', shortcut.autoCopy)
+
+  try {
+    // 1. 更新本地数据
+    const index = globalShortcuts.value.findIndex((s) => s.id === shortcut.id)
+    console.log('[AutoCopy] 找到快捷键索引:', index)
+
+    if (index >= 0) {
+      globalShortcuts.value[index].autoCopy = newAutoCopy
+      console.log('[AutoCopy] 本地数据已更新:', globalShortcuts.value[index])
+    }
+
+    // 2. 保存到数据库（清理数据，只保留可序列化的字段）
+    console.log('[AutoCopy] 开始保存到数据库...')
+    const dataToSave = globalShortcuts.value.map((s) => ({
+      id: s.id,
+      shortcut: s.shortcut,
+      target: s.target,
+      enabled: s.enabled,
+      autoCopy: s.autoCopy,
+      ...(s.configurable !== undefined && { configurable: s.configurable }),
+      ...(s.configKey !== undefined && { configKey: s.configKey })
+    }))
+    await window.ztools.internal.dbPut('global-shortcuts', dataToSave)
+    console.log('[AutoCopy] 数据库保存成功')
+
+    // 3. 通知主进程更新配置
+    console.log('[AutoCopy] 通知主进程更新配置:', {
+      shortcut: shortcut.shortcut,
+      autoCopy: newAutoCopy
+    })
+    const result = await window.ztools.internal.updateGlobalShortcutConfig(shortcut.shortcut, {
+      autoCopy: newAutoCopy
+    })
+    console.log('[AutoCopy] 主进程配置更新结果:', result)
+
+    if (!result.success) {
+      throw new Error(result.error || '更新配置失败')
+    }
+
+    console.log('[AutoCopy] 自动复制开关切换完成')
+  } catch (err: any) {
+    console.error('[AutoCopy] 更新自动复制开关失败:', err)
+    // 回滚
+    target.checked = !newAutoCopy
+    const index = globalShortcuts.value.findIndex((s) => s.id === shortcut.id)
+    if (index >= 0) {
+      globalShortcuts.value[index].autoCopy = !newAutoCopy
+      console.log('[AutoCopy] 已回滚本地数据')
+    }
   }
 }
 
@@ -1152,6 +1227,23 @@ useJumpFunction<ShortcutsSettingJumpFunction>(async (state) => {
               </div>
 
               <div class="shortcut-meta">
+                <!-- 自动复制开关（仅全局快捷键） -->
+                <div
+                  v-if="activeTab === 'global'"
+                  class="auto-copy-control"
+                  :title="(shortcut.autoCopy ?? false) ? '已启用自动复制' : '已禁用自动复制'"
+                >
+                  <span class="auto-copy-label">自动复制</span>
+                  <label class="toggle auto-copy-toggle">
+                    <input
+                      type="checkbox"
+                      :checked="shortcut.autoCopy ?? false"
+                      @change="handleAutoCopyToggle(shortcut, $event)"
+                    />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+
                 <button
                   class="icon-btn edit-btn"
                   title="编辑"
@@ -1441,6 +1533,20 @@ useJumpFunction<ShortcutsSettingJumpFunction>(async (state) => {
   gap: 6px;
 }
 
+.auto-copy-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 8px;
+  flex-shrink: 0;
+}
+
+.auto-copy-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
 .built-in-toggle {
   transform: scale(0.85);
   transform-origin: center;
@@ -1631,6 +1737,12 @@ useJumpFunction<ShortcutsSettingJumpFunction>(async (state) => {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.auto-copy-toggle {
+  margin-right: 8px;
+  transform: scale(0.85);
+  transform-origin: center;
 }
 
 .edit-btn {

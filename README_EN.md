@@ -28,7 +28,7 @@ English | [简体中文](./README.md)
 - 🌍 **Cross-Platform** - Native support for macOS and Windows with unified experience
 - 🔒 **Data Isolation** - Independent plugin data storage, secure and reliable
 - 🛠️ **Developer Friendly** - Complete TypeScript type support, hot reload development
-- ⚙️ **Modern Tech Stack** - Electron 38.5 + Node 22.20 + Chrome 140
+- ⚙️ **Modern Tech Stack** - Electron 41 + Node 24.15 + Chrome 146
 
 ## 📸 Preview
 
@@ -249,7 +249,7 @@ For detailed documentation, see [CLAUDE.md](./CLAUDE.md)
 
 ## 🛠️ Tech Stack
 
-- **Framework**: Electron 38 + Vue 3 + TypeScript
+- **Framework**: Electron 41 + Vue 3 + TypeScript
 - **Build**: Vite + electron-vite
 - **Database**: LMDB (high-performance key-value storage)
 - **State Management**: Pinia

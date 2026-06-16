@@ -4,6 +4,7 @@ export interface PluginFeature {
   explain?: string
   icon?: string
   cmds?: any[]
+  mainPush?: boolean
 }
 
 export interface PluginItem {

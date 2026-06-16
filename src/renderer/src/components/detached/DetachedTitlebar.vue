@@ -123,7 +123,9 @@
 
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { normalizeConfigList } from '@shared/pluginSettings'
 import AdaptiveIcon from '../common/AdaptiveIcon.vue'
+import { CommonKeyboardModifier, readModifiers } from '@renderer/utils/convertKeyboardEvent'
 
 const platform = ref<'darwin' | 'win32'>('darwin')
 const pluginName = ref('Plugin')
@@ -139,13 +141,6 @@ const acrylicDarkOpacity = ref(50) // 亚克力暗黑模式透明度（默认 50
 const aiRequestStatus = ref<'idle' | 'sending' | 'receiving'>('idle') // AI 请求状态
 const primaryColor = ref('blue')
 const customColor = ref('#db2777')
-
-function normalizeConfigList(data: unknown): string[] {
-  if (!Array.isArray(data)) return []
-  return (data as any[])
-    .map((item) => (typeof item === 'string' ? item : (item?.pluginName ?? '')))
-    .filter(Boolean)
-}
 
 function getThemeColor(colorName: string, isDark: boolean): string {
   const colors: Record<string, { light: string; dark: string }> = {
@@ -508,9 +503,10 @@ function handleKeydown(event: KeyboardEvent): void {
   }
 
   // 回车键传递给插件
+  const modifiers = readModifiers(event)
   if (event.key === 'Enter') {
     event.preventDefault()
-    sendKeyToPlugin('Enter')
+    sendKeyToPlugin('Enter', modifiers)
     return
   }
 
@@ -518,16 +514,16 @@ function handleKeydown(event: KeyboardEvent): void {
   if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
     // 上下方向键阻止默认行为并发送给插件
     event.preventDefault()
-    sendArrowKeyToPlugin(event.key)
+    sendArrowKeyToPlugin(event.key, modifiers)
   } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
     // 左右方向键允许在输入框中移动光标，不阻止默认行为
     // 但仍然发送给插件（某些插件可能需要）
-    sendArrowKeyToPlugin(event.key)
+    sendArrowKeyToPlugin(event.key, modifiers)
   }
 }
 
 // 发送方向键到插件
-function sendArrowKeyToPlugin(key: string): void {
+function sendArrowKeyToPlugin(key: string, modifiers: CommonKeyboardModifier[] = []): void {
   const keyCodeMap: Record<string, string> = {
     ArrowLeft: 'Left',
     ArrowRight: 'Right',
@@ -540,30 +536,34 @@ function sendArrowKeyToPlugin(key: string): void {
     // 发送 keyDown 事件
     window.electron.ipcRenderer.send('send-arrow-key', {
       type: 'keyDown',
-      keyCode
+      keyCode,
+      modifiers
     })
     // 短暂延迟后发送 keyUp 事件
     setTimeout(() => {
       window.electron.ipcRenderer.send('send-arrow-key', {
         type: 'keyUp',
-        keyCode
+        keyCode,
+        modifiers
       })
     }, 10)
   }
 }
 
 // 发送按键到插件（用于回车键等）
-function sendKeyToPlugin(key: string): void {
+function sendKeyToPlugin(key: string, modifiers: CommonKeyboardModifier[] = []): void {
   // 发送 keyDown 事件
   window.electron.ipcRenderer.send('send-arrow-key', {
     type: 'keyDown',
-    keyCode: key
+    keyCode: key,
+    modifiers
   })
   // 短暂延迟后发送 keyUp 事件
   setTimeout(() => {
     window.electron.ipcRenderer.send('send-arrow-key', {
       type: 'keyUp',
-      keyCode: key
+      keyCode: key,
+      modifiers
     })
   }, 10)
 }

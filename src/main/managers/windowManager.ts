@@ -17,6 +17,8 @@ import windowsIcon from '../../../resources/icons/windows-icon.png?asset'
 import api from '../api'
 import databaseAPI from '../api/shared/database'
 import doubleTapManager from '../core/doubleTapManager.js'
+import globalInputManager from '../core/globalInputManager.js'
+import { WindowManager as NativeWindowManager } from '../core/native/index.js'
 import clipboardManager from './clipboardManager'
 
 import { WINDOW_DEFAULT_HEIGHT, WINDOW_INITIAL_HEIGHT, WINDOW_WIDTH } from '../common/constants'
@@ -27,6 +29,8 @@ import pluginManager from './pluginManager'
 
 // 窗口材质类型
 type WindowMaterial = 'mica' | 'acrylic' | 'none'
+const WINDOW_BLUR_DRAG_INPUT_CONSUMER = 'window-blur-drag'
+const DEFAULT_MODAL_DIALOG_BLUR_HIDE_RELEASE_DELAY_MS = 500
 
 /**
  * 应用快捷键触发时携带的文件输入
@@ -61,7 +65,10 @@ class WindowManager {
   private static readonly MODIFIER_NAMES = ['Command', 'Ctrl', 'Alt', 'Option', 'Shift']
   private isQuitting = false // 是否正在退出应用
   private previousActiveWindow: {
-    app: string
+    app?: string
+    platform?: 'win32' | 'darwin'
+    kind?: 'windows-explorer' | 'windows-file-dialog' | 'mac-finder' | 'mac-file-dialog'
+    preciseTarget?: boolean
     bundleId?: string
     pid?: number
     title?: string
@@ -72,6 +79,12 @@ class WindowManager {
     appPath?: string
     className?: string
     hwnd?: number
+    windowId?: number
+    finderId?: number
+    path?: string
+    url?: string
+    axRole?: string
+    axSubrole?: string
   } | null = null // 打开应用前激活的窗口
   // private _shouldRestoreFocus = true // TODO: 是否在隐藏窗口时恢复焦点（待实现）
   private windowPositionsByDisplay: Record<number, { x: number; y: number }> = {}
@@ -80,8 +93,21 @@ class WindowManager {
   private lastFocusTarget: 'mainWindow' | 'plugin' | null = null // 窗口隐藏前的焦点状态
   private isRestoringFocus: boolean = false // 是否正在恢复焦点状态（防止 focus 事件监听器干扰）
   private suppressBlurHide: boolean = false // 临时抑制 blur 事件隐藏窗口（文件关联打开等场景）
+  // 原生模态对话框关闭前后可能发出排队的 blur/mouseup 事件。
+  private modalDialogBlurHideSuppressed: boolean = false
+  private modalDialogBlurHideReleaseTimer: ReturnType<typeof setTimeout> | null = null
+  private modalDialogBlurHideSuppressionDepth: number = 0
   private lastBlurHideTime: number = 0 // blur 导致隐藏窗口的时间戳（用于解决托盘点击竞态）
   private blurHideTimer: ReturnType<typeof setTimeout> | null = null // Linux blur 延迟隐藏定时器
+  // Double-tap 唤醒窗口时，Windows 可能紧跟一个短暂 blur；这两个 timer 用于跳过误关闭并补一次焦点。
+  private doubleTapFocusTimer: ReturnType<typeof setTimeout> | null = null
+  private windowsHotkeyFocusTimer: ReturnType<typeof setTimeout> | null = null
+  private doubleTapSuppressBlurTimer: ReturnType<typeof setTimeout> | null = null
+  // 全局左键状态用于区分“点击外部关闭”和“从外部拖文件进窗口”。拖拽时 blur 先挂起，等 mouseup 再判断。
+  private leftMouseDown: boolean = false // 全局左键是否按下，用于拖拽时延迟 blur 隐藏
+  private pendingBlurHideOnMouseUp: boolean = false // blur 时左键按下，等待 mouseup 再决定是否隐藏
+  private pendingBlurHideTimer: ReturnType<typeof setTimeout> | null = null // mouseup 兜底定时器
+  private mouseStateTrackingStarted: boolean = false
   private appShortcuts: Map<string, string> = new Map() // 应用快捷键映射表 (快捷键 -> 目标指令)
   private wakeupBlacklist: Array<{ app: string; bundleId?: string; label?: string }> = [] // 唤醒黑名单
   private onThemeInfoChanged: (() => void) | null = null // 主题信息变更回调钩子
@@ -106,6 +132,134 @@ class WindowManager {
    */
   public notifyBackToSearch(): void {
     this.mainWindow?.webContents.send('back-to-search')
+  }
+
+  private isLeftMouseButton(button: unknown): boolean {
+    return Number(button) === 1
+  }
+
+  private isPointInsideMainWindow(point: { x: number; y: number }): boolean {
+    if (!this.mainWindow) return false
+
+    const bounds = this.mainWindow.getBounds()
+    return (
+      point.x >= bounds.x &&
+      point.x <= bounds.x + bounds.width &&
+      point.y >= bounds.y &&
+      point.y <= bounds.y + bounds.height
+    )
+  }
+
+  private clearPendingBlurHideTimer(): void {
+    if (this.pendingBlurHideTimer) {
+      clearTimeout(this.pendingBlurHideTimer)
+      this.pendingBlurHideTimer = null
+    }
+  }
+
+  private isBlurHideSuppressed(): boolean {
+    return this.suppressBlurHide || this.modalDialogBlurHideSuppressed
+  }
+
+  private beginModalDialogBlurHideSuppression(): void {
+    if (this.modalDialogBlurHideReleaseTimer) {
+      clearTimeout(this.modalDialogBlurHideReleaseTimer)
+      this.modalDialogBlurHideReleaseTimer = null
+    }
+
+    this.modalDialogBlurHideSuppressionDepth += 1
+    this.modalDialogBlurHideSuppressed = true
+  }
+
+  private endModalDialogBlurHideSuppression(releaseDelayMs: number): void {
+    this.modalDialogBlurHideSuppressionDepth = Math.max(
+      0,
+      this.modalDialogBlurHideSuppressionDepth - 1
+    )
+    if (this.modalDialogBlurHideSuppressionDepth > 0) return
+
+    if (this.modalDialogBlurHideReleaseTimer) {
+      clearTimeout(this.modalDialogBlurHideReleaseTimer)
+    }
+
+    this.modalDialogBlurHideReleaseTimer = setTimeout(() => {
+      this.modalDialogBlurHideSuppressed = false
+      this.modalDialogBlurHideReleaseTimer = null
+    }, releaseDelayMs)
+  }
+
+  private isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
+    return (
+      value !== null &&
+      (typeof value === 'object' || typeof value === 'function') &&
+      typeof (value as { then?: unknown }).then === 'function'
+    )
+  }
+
+  private deferBlurHideUntilMouseUp(): void {
+    this.pendingBlurHideOnMouseUp = true
+    this.clearPendingBlurHideTimer()
+
+    // 兜底：如果系统没有发出 mouseup，不让 pending 状态永久阻止窗口关闭。
+    this.pendingBlurHideTimer = setTimeout(() => {
+      this.pendingBlurHideTimer = null
+      if (!this.pendingBlurHideOnMouseUp) return
+
+      this.pendingBlurHideOnMouseUp = false
+      if (this.isBlurHideSuppressed()) return
+      if (this.mainWindow?.isFocused()) return
+      if (pluginManager.isPluginViewFocused()) return
+
+      this.lastBlurHideTime = Date.now()
+      this.hideWindow(false)
+    }, 15000)
+  }
+
+  private resolveDeferredBlurHideOnMouseUp(): void {
+    this.pendingBlurHideOnMouseUp = false
+    this.clearPendingBlurHideTimer()
+
+    this.resolveMouseUpVisibility()
+  }
+
+  private resolveMouseUpVisibility(): void {
+    if (!this.mainWindow?.isVisible()) return
+    if (this.isBlurHideSuppressed()) return
+
+    // 拖拽最终落在窗口内时保持窗口；落在窗口外时按普通外部点击处理并关闭。
+    const cursorPoint = screen.getCursorScreenPoint()
+    if (this.isPointInsideMainWindow(cursorPoint)) {
+      if (!this.mainWindow.isFocused() && !pluginManager.isPluginViewFocused()) {
+        this.mainWindow.focus()
+      }
+      return
+    }
+
+    this.lastBlurHideTime = Date.now()
+    this.hideWindow(false)
+  }
+
+  private startMouseStateTracking(): void {
+    if (this.mouseStateTrackingStarted) return
+    this.mouseStateTrackingStarted = true
+
+    // 使用主进程的全局鼠标事件，而不是渲染层 drag 事件，因为 blur 会早于文件进入渲染层发生。
+    globalInputManager.on(WINDOW_BLUR_DRAG_INPUT_CONSUMER, 'mousedown', (event) => {
+      if (this.isLeftMouseButton(event.button)) {
+        this.leftMouseDown = true
+      }
+    })
+
+    globalInputManager.on(WINDOW_BLUR_DRAG_INPUT_CONSUMER, 'mouseup', (event) => {
+      if (!this.isLeftMouseButton(event.button)) return
+
+      this.leftMouseDown = false
+      if (this.pendingBlurHideOnMouseUp) {
+        this.resolveDeferredBlurHideOnMouseUp()
+      }
+    })
+
+    globalInputManager.acquire(WINDOW_BLUR_DRAG_INPUT_CONSUMER)
   }
 
   /**
@@ -292,7 +446,13 @@ class WindowManager {
     })
 
     this.mainWindow.on('blur', () => {
-      if (this.suppressBlurHide) return
+      if (this.isBlurHideSuppressed()) return
+
+      // 左键仍按下时可能是从外部拖文件进窗口，先等 mouseup 再决定是否隐藏。
+      if (this.leftMouseDown) {
+        this.deferBlurHideUntilMouseUp()
+        return
+      }
 
       if (platform.isLinux) {
         // Linux 上去掉了 type:'panel'，现在 blur 只会在真正点击其他窗口时触发。
@@ -303,6 +463,7 @@ class WindowManager {
         }
         this.blurHideTimer = setTimeout(() => {
           this.blurHideTimer = null
+          if (this.isBlurHideSuppressed()) return
           // 主窗口重新获焦 → 不隐藏
           if (this.mainWindow?.isFocused()) return
           // 插件视图持有焦点（应用内部切换）→ 不隐藏
@@ -317,6 +478,8 @@ class WindowManager {
         this.hideWindow(false)
       }
     })
+
+    this.startMouseStateTracking()
 
     this.mainWindow.on('show', () => {
       // 开始恢复焦点流程，防止 focus 事件监听器修改 lastFocusTarget
@@ -501,7 +664,7 @@ class WindowManager {
     if (this.isDoubleTapShortcut(keyToRegister)) {
       const modifier = keyToRegister.split('+')[0]
       doubleTapManager.register(modifier, () => {
-        this.toggleWindow()
+        this.toggleWindowFromDoubleTap()
       })
       this.currentShortcut = keyToRegister
       this.isDoubleTapMode = true
@@ -520,7 +683,7 @@ class WindowManager {
       if (oldIsDoubleTapMode) {
         const oldModifier = oldShortcut.split('+')[0]
         doubleTapManager.register(oldModifier, () => {
-          this.toggleWindow()
+          this.toggleWindowFromDoubleTap()
         })
       } else {
         globalShortcut.register(oldShortcut, () => {
@@ -537,21 +700,7 @@ class WindowManager {
     return ret
   }
 
-  public setPreviousActiveWindow(
-    windowInfo: {
-      app: string
-      bundleId?: string
-      pid?: number
-      title?: string
-      x?: number
-      y?: number
-      width?: number
-      height?: number
-      appPath?: string
-      className?: string
-      hwnd?: number
-    } | null
-  ): void {
+  public setPreviousActiveWindow(windowInfo: typeof this.previousActiveWindow): void {
     this.previousActiveWindow = windowInfo
   }
 
@@ -595,6 +744,35 @@ class WindowManager {
         return
       }
       this.showWindow()
+      if (platform.isWindows) {
+        this.scheduleWindowsHotkeyRefocus()
+      }
+    }
+  }
+
+  private toggleWindowFromDoubleTap(): void {
+    if (!this.mainWindow) return
+
+    const willShow = !(this.mainWindow.isFocused() && this.mainWindow.isVisible())
+    if (willShow) {
+      // Double-tap 的 uiohook 回调刚触发后，系统可能补发一次 transient blur，短暂忽略避免刚显示就关闭。
+      this.suppressBlurHide = true
+      if (this.doubleTapSuppressBlurTimer) clearTimeout(this.doubleTapSuppressBlurTimer)
+      this.doubleTapSuppressBlurTimer = setTimeout(() => {
+        this.suppressBlurHide = false
+        this.doubleTapSuppressBlurTimer = null
+      }, 350)
+    }
+
+    this.toggleWindow()
+
+    if (willShow && platform.isWindows) {
+      if (this.doubleTapFocusTimer) clearTimeout(this.doubleTapFocusTimer)
+      // Windows 上延后一小段时间再聚焦，避开窗口 show 和系统焦点切换尚未稳定的阶段。
+      this.doubleTapFocusTimer = setTimeout(() => {
+        this.refocusSearchAfterDoubleTap()
+        this.doubleTapFocusTimer = null
+      }, 80)
     }
   }
 
@@ -618,6 +796,43 @@ class WindowManager {
 
     // 4. 聚焦窗口
     this.mainWindow.focus()
+  }
+
+  private refocusSearchAfterDoubleTap(): void {
+    if (!platform.isWindows) return
+    if (!this.mainWindow?.isVisible()) return
+
+    this.refocusActiveContentOnWindows()
+  }
+
+  private scheduleWindowsHotkeyRefocus(): void {
+    if (!platform.isWindows) return
+    if (this.windowsHotkeyFocusTimer) clearTimeout(this.windowsHotkeyFocusTimer)
+    // Windows 前台键盘目标有时会晚于 show/focus 稳定，延后一小段时间再补激活。
+    this.windowsHotkeyFocusTimer = setTimeout(() => {
+      this.refocusActiveContentOnWindows()
+      this.windowsHotkeyFocusTimer = null
+    }, 80)
+  }
+
+  private refocusActiveContentOnWindows(): void {
+    if (!platform.isWindows) return
+    if (!this.mainWindow?.isVisible()) return
+
+    app.focus({ steal: true })
+    this.mainWindow.show()
+    this.mainWindow.moveTop()
+    // Electron 的 isFocused 有时已经为 true，但 Windows 前台键盘目标仍未切到本应用；这里用原生激活补齐。
+    NativeWindowManager.activateWindow(process.pid)
+    this.mainWindow.focus()
+    if (pluginManager.getCurrentPluginPath() !== null && this.lastFocusTarget !== 'mainWindow') {
+      pluginManager.focusPluginView()
+      setImmediate(() => pluginManager.forceRepaintCurrentView())
+      return
+    }
+
+    this.mainWindow.webContents.focus()
+    this.mainWindow.webContents.send('focus-search', this.previousActiveWindow || null)
   }
 
   /**
@@ -671,9 +886,12 @@ class WindowManager {
       this.previousActiveWindow = currentWindow
 
       // 唤醒黑名单检查：当前活动窗口在黑名单中时不弹出
-      if (this.isAppInWakeupBlacklist(currentWindow)) {
-        this.isRestoringFocus = false
-        return
+      if (currentWindow.app) {
+        const wakeupWindow = { ...currentWindow, app: currentWindow.app }
+        if (this.isAppInWakeupBlacklist(wakeupWindow)) {
+          this.isRestoringFocus = false
+          return
+        }
       }
     }
 
@@ -703,6 +921,51 @@ class WindowManager {
 
     // 启动自动返回搜索定时器
     this.startAutoBackToSearchTimer()
+  }
+
+  public withBlurHideSuppressed<T>(
+    callback: () => PromiseLike<T>,
+    releaseDelayMs?: number
+  ): Promise<T>
+  public withBlurHideSuppressed<T>(callback: () => T, releaseDelayMs?: number): T
+  public withBlurHideSuppressed<T>(
+    callback: () => T | PromiseLike<T>,
+    releaseDelayMs: number = DEFAULT_MODAL_DIALOG_BLUR_HIDE_RELEASE_DELAY_MS
+  ): T | Promise<T> {
+    this.beginModalDialogBlurHideSuppression()
+    try {
+      const result = callback()
+      if (this.isPromiseLike(result)) {
+        return Promise.resolve(result).finally(() => {
+          this.endModalDialogBlurHideSuppression(releaseDelayMs)
+        })
+      }
+
+      this.endModalDialogBlurHideSuppression(releaseDelayMs)
+      return result
+    } catch (error) {
+      this.endModalDialogBlurHideSuppression(releaseDelayMs)
+      throw error
+    }
+  }
+
+  public withBlurHideSuppressedSync<T>(
+    callback: () => T,
+    releaseDelayMs: number = DEFAULT_MODAL_DIALOG_BLUR_HIDE_RELEASE_DELAY_MS
+  ): T {
+    this.beginModalDialogBlurHideSuppression()
+    try {
+      const result = callback()
+      if (this.isPromiseLike(result)) {
+        throw new TypeError('withBlurHideSuppressedSync callback must not return a Promise')
+      }
+
+      this.endModalDialogBlurHideSuppression(releaseDelayMs)
+      return result
+    } catch (error) {
+      this.endModalDialogBlurHideSuppression(releaseDelayMs)
+      throw error
+    }
   }
 
   /**
@@ -794,19 +1057,7 @@ class WindowManager {
   /**
    * 获取打开窗口前激活的窗口
    */
-  public getPreviousActiveWindow(): {
-    app: string
-    bundleId?: string
-    pid?: number
-    title?: string
-    x?: number
-    y?: number
-    width?: number
-    height?: number
-    appPath?: string
-    className?: string
-    hwnd?: number
-  } | null {
+  public getPreviousActiveWindow(): typeof this.previousActiveWindow {
     return this.previousActiveWindow
   }
 
@@ -841,21 +1092,27 @@ class WindowManager {
       return false
     }
 
+    const previousApp = this.previousActiveWindow.app
+    if (!previousApp) {
+      console.log('[Window] 前一个激活窗口缺少应用标识')
+      return false
+    }
+
     // 忽略同类启动器工具，避免激活冲突
     const ignoredApps = ['uTools', 'Alfred', 'Raycast', 'Wox', 'Listary']
-    if (ignoredApps.includes(this.previousActiveWindow.app)) {
-      console.log(`跳过恢复同类工具: ${this.previousActiveWindow.app}`)
+    if (ignoredApps.includes(previousApp)) {
+      console.log(`跳过恢复同类工具: ${previousApp}`)
       return false
     }
 
     try {
       const success = clipboardManager.activateApp(this.previousActiveWindow)
       if (success) {
-        console.log(`已恢复激活窗口: ${this.previousActiveWindow.app}`)
+        console.log(`已恢复激活窗口: ${previousApp}`)
         return true
       } else {
         // 静默失败，不报错（可能进程已关闭或窗口已销毁）
-        console.log(`无法恢复窗口: ${this.previousActiveWindow.app}`)
+        console.log(`无法恢复窗口: ${previousApp}`)
         return false
       }
     } catch (error) {
@@ -877,6 +1134,8 @@ class WindowManager {
   public unregisterAllShortcuts(): void {
     globalShortcut.unregisterAll()
     doubleTapManager.unregisterAll()
+    globalInputManager.release(WINDOW_BLUR_DRAG_INPUT_CONSUMER)
+    this.mouseStateTrackingStarted = false
     this.isDoubleTapMode = false
   }
 

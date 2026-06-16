@@ -45,6 +45,10 @@ declare global {
           pluginPath: string,
           disabled: boolean
         ) => Promise<{ success: boolean; error?: string }>
+        setPluginMainPushEnabled: (
+          pluginName: string,
+          enabled: boolean
+        ) => Promise<{ success: boolean; error?: string }>
         getAllPlugins: () => Promise<
           Array<{
             name: string
@@ -173,6 +177,23 @@ declare global {
           type?: 'document' | 'attachment'
           error?: string
         }>
+        deletePluginDoc: (
+          pluginName: string,
+          key: string
+        ) => Promise<{
+          success: boolean
+          deletedCount?: number
+          error?: string
+        }>
+        exportPluginDoc: (
+          pluginName: string,
+          key: string
+        ) => Promise<{
+          success: boolean
+          exportPath?: string
+          canceled?: boolean
+          error?: string
+        }>
         getPluginDataStats: () => Promise<{
           success: boolean
           data?: Array<{
@@ -212,12 +233,17 @@ declare global {
         getCurrentShortcut: () => Promise<string>
         registerGlobalShortcut: (
           shortcut: string,
-          target: string
+          target: string,
+          autoCopy?: boolean
         ) => Promise<{ success: boolean; error?: string }>
         unregisterGlobalShortcut: (shortcut: string) => Promise<{
           success: boolean
           error?: string
         }>
+        updateGlobalShortcutConfig: (
+          shortcut: string,
+          config: { autoCopy: boolean }
+        ) => Promise<{ success: boolean; error?: string }>
         registerAppShortcut: (
           shortcut: string,
           target: string
@@ -400,17 +426,6 @@ declare global {
           add: (model: any) => Promise<{ success: boolean; error?: string }>
           update: (model: any) => Promise<{ success: boolean; error?: string }>
           delete: (id: string) => Promise<{ success: boolean; error?: string }>
-        }
-
-        // 网页快开
-        webSearch: {
-          getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>
-          add: (engine: any) => Promise<{ success: boolean; error?: string }>
-          update: (engine: any) => Promise<{ success: boolean; error?: string }>
-          delete: (id: string) => Promise<{ success: boolean; error?: string }>
-          fetchFavicon: (
-            url: string
-          ) => Promise<{ success: boolean; data?: string; error?: string }>
         }
 
         // 超级面板

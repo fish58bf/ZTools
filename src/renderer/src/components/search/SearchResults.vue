@@ -168,7 +168,8 @@ const windowMatchedActions = computed(() => {
   // 使用 commandDataStore 的 searchWindowCommands 进行匹配
   const matched = commandDataStore.searchWindowCommands({
     app: currentWindow.app,
-    title: currentWindow.title
+    title: currentWindow.title,
+    className: currentWindow.className
   })
 
   // 如果有搜索内容，在匹配的窗口指令中进一步搜索

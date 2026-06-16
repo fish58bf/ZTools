@@ -14,6 +14,8 @@ defineProps<{
   isAutoKill: boolean
   isAutoDetach: boolean
   isAutoStart: boolean
+  isMainPushEnabled: boolean
+  showMainPushToggle?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -27,6 +29,7 @@ const emit = defineEmits<{
   (e: 'toggle-auto-kill'): void
   (e: 'toggle-auto-detach'): void
   (e: 'toggle-auto-start'): void
+  (e: 'toggle-main-push-enabled'): void
 }>()
 
 function handleDisabledToggle(event: Event): void {
@@ -105,6 +108,20 @@ function handleDisabledToggle(event: Event): void {
             </div>
             <label class="toggle">
               <input type="checkbox" :checked="!isDisabled" @change="handleDisabledToggle" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div v-if="showMainPushToggle" class="settings-dropdown-item">
+            <div class="settings-item-info">
+              <span class="settings-item-label">搜索栏推送</span>
+              <span class="settings-item-desc">关闭后不在搜索栏动态推送内容</span>
+            </div>
+            <label class="toggle">
+              <input
+                type="checkbox"
+                :checked="isMainPushEnabled"
+                @change="emit('toggle-main-push-enabled')"
+              />
               <span class="toggle-slider"></span>
             </label>
           </div>

@@ -4,6 +4,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import plist from 'simple-plist'
 import { extractAcronym } from '../../utils/common'
+import { getMacApplicationPaths } from '../../utils/systemPaths'
 import { Command } from './types'
 import { pLimit } from './utils'
 
@@ -327,33 +328,64 @@ async function getAppDisplayInfo(appPath: string): Promise<LocalizedAppMetadata>
   return { name, aliases }
 }
 
+// 递归收集目录下的 .app bundle
+// - 遇到 .app 目录：收集，不再深入（避免把 *.app 内部的 helper 子 app 扫进来）
+// - 遇到普通目录且 depth > 0：下钻一层
+//   这样可覆盖浏览器 PWA（~/Applications/Chrome Apps.localized/*.app、
+//   Edge Apps.localized 等）以及 /Applications/Microsoft Office/*.app 这类嵌套应用
+// - 符号链接：readdir 不跟随，指向目录的链接 isDirectory() 为 false，需用 stat 解析真实类型，
+//   否则像 /Applications/Safari.app 这类被链接的应用会被漏扫
+async function collectAppBundles(dir: string, depth: number, out: string[]): Promise<void> {
+  let entries: fsSync.Dirent[]
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true })
+  } catch {
+    return
+  }
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name)
+
+    // 解析真实类型：符号链接用 stat 跟随判断是否指向目录
+    let isDirectory = entry.isDirectory()
+    if (!isDirectory && entry.isSymbolicLink()) {
+      try {
+        isDirectory = (await fs.stat(fullPath)).isDirectory()
+      } catch {
+        continue // 断链 / 无权限，跳过
+      }
+    }
+    if (!isDirectory) continue
+
+    if (entry.name.endsWith('.app')) {
+      out.push(fullPath)
+      continue
+    }
+
+    if (depth > 0) {
+      await collectAppBundles(fullPath, depth - 1, out)
+    }
+  }
+}
+
 export async function scanApplications(): Promise<Command[]> {
   try {
     console.time('[Scanner] 扫描应用')
 
-    // 只扫描常用应用目录
-    const searchPaths = [
-      '/Applications',
-      '/System/Applications',
-      '/System/Applications/Utilities/',
-      `${process.env.HOME}/Applications`
-    ]
+    // 扫描常用应用目录（与 AppWatcher 监听路径共用同一数据源）
+    // Utilities 是 /System/Applications 的直接子目录，depth=1 已自动覆盖，无需显式列出
+    const searchPaths = getMacApplicationPaths()
 
-    const allAppPaths: string[] = []
+    const collected: string[] = []
 
-    // 快速读取所有应用路径
+    // 读取所有应用路径（下钻一层以覆盖浏览器 PWA 等嵌套在子目录中的 .app）
     for (const searchPath of searchPaths) {
-      try {
-        const entries = await fs.readdir(searchPath, { withFileTypes: true })
-        const appDirs = entries
-          .filter((entry) => entry.isDirectory() && entry.name.endsWith('.app'))
-          .map((entry) => path.join(searchPath, entry.name))
-
-        allAppPaths.push(...appDirs)
-      } catch {
-        continue
-      }
+      await collectAppBundles(searchPath, 1, collected)
     }
+
+    // 不同搜索路径可能扫到同一 .app（如 /System/Applications/Utilities 既被显式列出
+    // 又会从 /System/Applications 下钻命中），按路径去重
+    const allAppPaths = [...new Set(collected)]
 
     console.log(`[Scanner] 找到 ${allAppPaths.length} 个应用`)
 

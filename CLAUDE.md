@@ -3,7 +3,7 @@
 ## 项目概述
 
 ZTools 是一个跨平台 (macOS/Windows) 应用启动器和插件平台，类似 Alfred/Raycast。
-技术栈：Electron 38 + Vue 3 + TypeScript + Pinia + LMDB + WebContentsView。
+技术栈：Electron 41 + Vue 3 + TypeScript + Pinia + LMDB + WebContentsView。
 
 核心能力：拼音搜索、插件系统（UI/无界面）、剪贴板管理、超级面板、分离窗口、WebDAV 同步、MCP Server、AI 集成、ZBrowser 浏览器自动化、离线翻译、悬浮球、网页快开。
 

@@ -96,15 +96,10 @@ export class WindowAPI {
       const maxHeight = display.workAreaSize.height
       const newHeight = Math.max(WINDOW_INITIAL_HEIGHT, Math.min(height, maxHeight))
 
-      // 保留当前 x/y 位置：Windows 下 setSize 会导致窗口向左偏移（DPI 缩放/阴影帧影响）
-      const [currentX, currentY] = this.mainWindow.getPosition()
-
-      // 临时启用 resizable 以允许代码调整大小
-      this.mainWindow.setResizable(true)
-      // 使用 setBounds 代替 setSize，确保只改高度不改位置
-      this.mainWindow.setBounds({ x: currentX, y: currentY, width, height: newHeight })
-      // 立即禁用 resizable，防止用户手动调整
-      this.mainWindow.setResizable(false)
+      this.mainWindow.setBounds({
+        width,
+        height: newHeight
+      })
 
       // 如果当前处于锁定状态，更新锁定的尺寸
       if (this.lockedSize) {

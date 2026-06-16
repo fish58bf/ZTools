@@ -1,4 +1,4 @@
-import { app, IpcMainInvokeEvent, ipcMain } from 'electron'
+import { app, dialog, IpcMainInvokeEvent, ipcMain } from 'electron'
 import type { PluginManager } from '../../managers/pluginManager'
 import windowManager from '../../managers/windowManager.js'
 import logCollector from '../../core/logCollector.js'
@@ -13,9 +13,9 @@ import aiModelsAPI from '../renderer/aiModels.js'
 import commandsAPI from '../renderer/commands.js'
 import pluginsAPI from '../renderer/plugins.js'
 import type { DeletePluginOptions } from '../renderer/plugins'
+import { promises as fs } from 'fs'
 import settingsAPI from '../renderer/settings.js'
 import systemAPI from '../renderer/system.js'
-import webSearchAPI from '../renderer/webSearch.js'
 import windowAPI from '../renderer/window.js'
 import pluginToolsAPI from './tools'
 import databaseAPI from '../shared/database'
@@ -212,6 +212,16 @@ export class InternalPluginAPI {
       }
       return await pluginsAPI.getAllPlugins()
     })
+
+    ipcMain.handle(
+      'internal:set-plugin-main-push-enabled',
+      async (event, pluginName: string, enabled: boolean) => {
+        if (!requireInternalPlugin(this.pluginManager, event)) {
+          throw new PermissionDeniedError('internal:set-plugin-main-push-enabled')
+        }
+        return await pluginsAPI.setPluginMainPushEnabled(pluginName, enabled)
+      }
+    )
 
     ipcMain.handle('internal:select-plugin-file', async (event) => {
       if (!requireInternalPlugin(this.pluginManager, event)) {
@@ -439,6 +449,51 @@ export class InternalPluginAPI {
       }
       return await databaseAPI.getPluginDoc(pluginName, docKey)
     })
+
+    ipcMain.handle(
+      'internal:delete-plugin-doc',
+      async (event, pluginName: string, docKey: string) => {
+        if (!requireInternalPlugin(this.pluginManager, event)) {
+          throw new PermissionDeniedError('internal:delete-plugin-doc')
+        }
+        return await databaseAPI.deletePluginDoc(pluginName, docKey)
+      }
+    )
+
+    ipcMain.handle(
+      'internal:export-plugin-doc',
+      async (event, pluginName: string, docKey: string) => {
+        if (!requireInternalPlugin(this.pluginManager, event)) {
+          throw new PermissionDeniedError('internal:export-plugin-doc')
+        }
+
+        const result = await databaseAPI.getPluginDoc(pluginName, docKey)
+        if (!result.success) return result
+
+        const targetWindow =
+          detachedWindowManager.getWindowByPluginWebContents(event.sender.id) || this.mainWindow
+        if (!targetWindow) {
+          return { success: false, error: '未找到窗口' }
+        }
+
+        const safePluginName = pluginName.replace(/[\\/:*?"<>|]/g, '_')
+        const safeDocKey = docKey.replace(/[\\/:*?"<>|]/g, '_')
+        const saveResult = await windowManager.withBlurHideSuppressed(() =>
+          dialog.showSaveDialog(targetWindow, {
+            title: '导出文档',
+            defaultPath: `${safePluginName}-${safeDocKey}.json`,
+            filters: [{ name: 'JSON', extensions: ['json'] }]
+          })
+        )
+
+        if (saveResult.canceled || !saveResult.filePath) {
+          return { success: false, canceled: true }
+        }
+
+        await fs.writeFile(saveResult.filePath, JSON.stringify(result.data, null, 2), 'utf-8')
+        return { success: true, exportPath: saveResult.filePath }
+      }
+    )
 
     ipcMain.handle('internal:get-plugin-data-stats', async (event) => {
       if (!requireInternalPlugin(this.pluginManager, event)) {
@@ -981,58 +1036,6 @@ export class InternalPluginAPI {
         throw new PermissionDeniedError('internal:analyze-image')
       }
       return await analyzeImage(imagePath)
-    })
-
-    // ==================== 网页快开 API ====================
-    ipcMain.handle('internal:web-search-get-all', async (event) => {
-      if (!requireInternalPlugin(this.pluginManager, event)) {
-        throw new PermissionDeniedError('internal:web-search-get-all')
-      }
-      try {
-        const engines = webSearchAPI.getAllEngines()
-        return { success: true, data: engines }
-      } catch (error: unknown) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : '未知错误'
-        }
-      }
-    })
-
-    ipcMain.handle('internal:web-search-add', async (event, engine: any) => {
-      if (!requireInternalPlugin(this.pluginManager, event)) {
-        throw new PermissionDeniedError('internal:web-search-add')
-      }
-      return await webSearchAPI.addEngine(engine)
-    })
-
-    ipcMain.handle('internal:web-search-update', async (event, engine: any) => {
-      if (!requireInternalPlugin(this.pluginManager, event)) {
-        throw new PermissionDeniedError('internal:web-search-update')
-      }
-      return await webSearchAPI.updateEngine(engine)
-    })
-
-    ipcMain.handle('internal:web-search-delete', async (event, engineId: string) => {
-      if (!requireInternalPlugin(this.pluginManager, event)) {
-        throw new PermissionDeniedError('internal:web-search-delete')
-      }
-      return await webSearchAPI.deleteEngine(engineId)
-    })
-
-    ipcMain.handle('internal:web-search-fetch-favicon', async (event, url: string) => {
-      if (!requireInternalPlugin(this.pluginManager, event)) {
-        throw new PermissionDeniedError('internal:web-search-fetch-favicon')
-      }
-      try {
-        const icon = await webSearchAPI.fetchFavicon(url)
-        return { success: true, data: icon }
-      } catch (error: unknown) {
-        return {
-          success: false,
-          error: error instanceof Error ? error.message : '未知错误'
-        }
-      }
     })
 
     // ==================== 调试日志 API ====================

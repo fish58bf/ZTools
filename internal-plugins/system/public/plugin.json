@@ -90,7 +90,8 @@
           "type": "window",
           "label": "复制路径",
           "match": {
-            "app": ["Finder.app", "explorer.exe"]
+            "app": ["Finder.app", "explorer.exe"],
+            "className": ["", "CabinetWClass"]
           }
         },
         {
@@ -110,7 +111,8 @@
           "type": "window",
           "label": "在终端打开",
           "match": {
-            "app": ["Finder.app", "explorer.exe"]
+            "app": ["Finder.app", "explorer.exe"],
+            "className": ["", "CabinetWClass"]
           }
         },
         {

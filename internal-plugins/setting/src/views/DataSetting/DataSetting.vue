@@ -101,6 +101,60 @@ async function viewPluginDocs(pluginData: PluginData): Promise<void> {
   }
 }
 
+// 删除文档
+async function deleteDocContent(docItem: DocItem): Promise<void> {
+  if (!currentPluginData.value) return
+
+  const confirmed = await confirm({
+    title: '删除文档',
+    message: `确定要删除文档“${docItem.key}”吗？\n\n此操作不可恢复。`,
+    type: 'danger',
+    confirmText: '删除',
+    cancelText: '取消'
+  })
+  if (!confirmed) return
+
+  try {
+    const result = await window.ztools.internal.deletePluginDoc(
+      currentPluginData.value.pluginName,
+      docItem.key
+    )
+    if (result.success) {
+      success('文档删除成功')
+      if (selectedDocKey.value === docItem.key) {
+        closeDocDetailModal()
+      }
+      await viewPluginDocs(currentPluginData.value)
+      await loadPluginData()
+    } else {
+      error(`删除失败: ${result.error || '未知错误'}`)
+    }
+  } catch (err) {
+    console.error('删除文档失败:', err)
+    error('删除文档失败')
+  }
+}
+
+// 导出文档
+async function exportDocContent(docItem: DocItem): Promise<void> {
+  if (!currentPluginData.value) return
+
+  try {
+    const result = await window.ztools.internal.exportPluginDoc(
+      currentPluginData.value.pluginName,
+      docItem.key
+    )
+    if (result.success) {
+      success('文档导出成功')
+    } else if (!result.canceled) {
+      error(`导出失败: ${result.error || '未知错误'}`)
+    }
+  } catch (err) {
+    console.error('导出文档失败:', err)
+    error('导出文档失败')
+  }
+}
+
 // 查看文档内容
 async function viewDocContent(key: string): Promise<void> {
   if (!currentPluginData.value) return
@@ -280,6 +334,20 @@ onUnmounted(() => {
           @click="viewDocContent(docItem.key)"
         >
           <span class="doc-key">{{ docItem.key }}</span>
+          <button
+            class="icon-btn delete-doc-btn"
+            title="删除文档"
+            @click.stop="deleteDocContent(docItem)"
+          >
+            <div class="i-z-trash font-size-16px" />
+          </button>
+          <button
+            class="icon-btn export-doc-btn"
+            title="导出文档"
+            @click.stop="exportDocContent(docItem)"
+          >
+            <div class="i-z-download font-size-16px" />
+          </button>
           <span class="doc-type-badge" :class="`type-${docItem.type}`">
             {{ docItem.type === 'document' ? '文档' : '附件' }}
           </span>
@@ -561,6 +629,30 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.delete-doc-btn,
+.export-doc-btn {
+  margin-left: 12px;
+  transition: all 0.2s;
+}
+
+.delete-doc-btn {
+  color: var(--danger-color);
+}
+
+.delete-doc-btn:hover {
+  background: var(--danger-light-bg);
+  color: var(--danger-color);
+}
+
+.export-doc-btn {
+  color: var(--primary-color);
+}
+
+.export-doc-btn:hover {
+  background: var(--primary-light-bg);
+  color: var(--primary-color);
 }
 
 .doc-type-badge {

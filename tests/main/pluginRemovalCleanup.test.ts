@@ -57,12 +57,6 @@ vi.mock('../../src/main/api/plugin/feature', () => ({
   }
 }))
 
-vi.mock('../../src/main/api/renderer/webSearch', () => ({
-  default: {
-    getSearchEngineFeatures: vi.fn(async () => [])
-  }
-}))
-
 vi.mock('../../src/main/core/lmdb/lmdbInstance', () => ({
   default: {
     allDocs: vi.fn(() => []),
@@ -88,6 +82,7 @@ import {
 } from '../../src/main/api/renderer/pluginDevelopmentRegistry'
 import { PluginDevProjectsAPI } from '../../src/main/api/renderer/pluginDevProjects'
 import { PluginsAPI } from '../../src/main/api/renderer/plugins'
+import { ENABLED_MAIN_PUSH_PLUGINS_KEY } from '../../src/shared/pluginSettings'
 
 describe('plugin removal cleanup', () => {
   beforeEach(() => {
@@ -249,5 +244,62 @@ describe('plugin removal cleanup', () => {
     expect(mockClearPluginData).not.toHaveBeenCalled()
     expect(mockDbPut).toHaveBeenCalledWith('plugins', [])
     expect(mockFsRm).toHaveBeenCalledWith('D:\\plugins\\demo', { recursive: true, force: true })
+  })
+
+  it('cleans plugin settings when uninstalling and clearing plugin data', async () => {
+    mockDbGet.mockImplementation((key: string) => {
+      if (key === 'plugins') {
+        return [{ name: 'demo', path: 'D:\\plugins\\demo', isDevelopment: false }]
+      }
+      if (key === 'outKillPlugin') {
+        return ['demo', 'other']
+      }
+      if (key === 'autoDetachPlugin') {
+        return ['demo']
+      }
+      if (key === 'autoStartPlugin') {
+        return [{ pluginName: 'demo' }, { pluginName: 'other' }]
+      }
+      if (key === ENABLED_MAIN_PUSH_PLUGINS_KEY) {
+        return ['demo', 'other']
+      }
+      return []
+    })
+
+    const api = new PluginsAPI()
+    const killPlugin = vi.fn()
+    const removePluginUsageData = vi.fn()
+
+    ;(api as any).pluginManager = { killPlugin }
+    ;(api as any).devProjects = { removePluginUsageData }
+    ;(api as any).mainWindow = { webContents: { send: vi.fn() } }
+    ;(api as any).disabledPluginPathSet = new Set<string>()
+
+    const result = await api.deletePlugin('D:\\plugins\\demo', { deleteData: true })
+
+    expect(result).toEqual({ success: true })
+    expect(mockDbPut).toHaveBeenCalledWith('outKillPlugin', ['other'])
+    expect(mockDbPut).toHaveBeenCalledWith('autoDetachPlugin', [])
+    expect(mockDbPut).toHaveBeenCalledWith('autoStartPlugin', ['other'])
+    expect(mockDbPut).toHaveBeenCalledWith(ENABLED_MAIN_PUSH_PLUGINS_KEY, ['other'])
+  })
+
+  it('updates mainPush availability by plugin name and notifies command reload', async () => {
+    mockDbGet.mockImplementation((key: string) => {
+      if (key === ENABLED_MAIN_PUSH_PLUGINS_KEY) {
+        return ['other']
+      }
+      return []
+    })
+
+    const api = new PluginsAPI()
+    const send = vi.fn()
+    ;(api as any).mainWindow = { webContents: { send } }
+
+    const result = await api.setPluginMainPushEnabled('demo', true)
+
+    expect(result).toEqual({ success: true })
+    expect(mockDbPut).toHaveBeenCalledWith(ENABLED_MAIN_PUSH_PLUGINS_KEY, ['other', 'demo'])
+    expect(send).toHaveBeenCalledWith('plugins-changed')
   })
 })

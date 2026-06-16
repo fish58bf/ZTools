@@ -15,6 +15,11 @@ import {
   normalizeCommandAliases,
   type CommandAliasStore
 } from '@shared/commandShared'
+import {
+  ENABLED_MAIN_PUSH_PLUGINS_KEY,
+  isMainPushPluginEnabled,
+  normalizeConfigList
+} from '@shared/pluginSettings'
 
 // 正则匹配指令
 interface RegexCmd {
@@ -57,6 +62,7 @@ interface WindowCmd {
   match: {
     app?: string[] // 匹配应用名称列表（如 ["Finder.app"]）
     title?: string // 匹配窗口标题的正则表达式字符串
+    className?: string[]
   }
 }
 
@@ -193,6 +199,7 @@ export const useCommandDataStore = defineStore('commandData', () => {
   const disabledCommands = ref<string[]>([])
   const DISABLED_COMMANDS_KEY = 'disable-commands'
   const disabledPluginPaths = ref<string[]>([])
+  const enabledMainPushPluginNames = ref<string[]>([])
 
   function setDisabledPluginPaths(paths: unknown): void {
     disabledPluginPaths.value = Array.isArray(paths)
@@ -449,6 +456,16 @@ export const useCommandDataStore = defineStore('commandData', () => {
     }
   }
 
+  async function loadEnabledMainPushPlugins(): Promise<void> {
+    try {
+      const data = await window.ztools.dbGet(ENABLED_MAIN_PUSH_PLUGINS_KEY)
+      enabledMainPushPluginNames.value = normalizeConfigList(data)
+    } catch (error) {
+      console.error('加载启用 mainPush 插件列表失败:', error)
+      enabledMainPushPluginNames.value = []
+    }
+  }
+
   async function loadSearchPreference(): Promise<void> {
     try {
       const data = await window.ztools.dbGet('search-preference')
@@ -491,7 +508,11 @@ export const useCommandDataStore = defineStore('commandData', () => {
 
     try {
       // 先加载禁用指令列表和指令列表，再加载历史记录和固定列表（历史记录清理需要依赖指令列表）
-      await Promise.all([loadDisabledCommands(), loadDisabledPlugins()])
+      await Promise.all([
+        loadDisabledCommands(),
+        loadDisabledPlugins(),
+        loadEnabledMainPushPlugins()
+      ])
       await loadCommands()
       await Promise.all([
         loadHistoryData(),
@@ -651,12 +672,14 @@ export const useCommandDataStore = defineStore('commandData', () => {
    */
   async function reloadPluginCommands(): Promise<void> {
     try {
-      const [plugins, disabledPlugins, commandAliases] = await Promise.all([
+      const [plugins, disabledPlugins, enabledMainPushPlugins, commandAliases] = await Promise.all([
         window.ztools.getAllPlugins(),
         window.ztools.getDisabledPlugins(),
+        window.ztools.dbGet(ENABLED_MAIN_PUSH_PLUGINS_KEY),
         loadCommandAliases()
       ])
       setDisabledPluginPaths(disabledPlugins)
+      enabledMainPushPluginNames.value = normalizeConfigList(enabledMainPushPlugins)
       const enabledPluginPaths = getEnabledPluginPaths(plugins)
       enabledPluginsCache.value = plugins.filter((plugin: any) =>
         enabledPluginPaths.has(plugin.path)
@@ -762,7 +785,9 @@ export const useCommandDataStore = defineStore('commandData', () => {
         if (!feature.cmds || !Array.isArray(feature.cmds)) continue
 
         const featureIcon = feature.icon || plugin.logo
-        const isMainPush = !!feature.mainPush
+        const isMainPush =
+          !!feature.mainPush &&
+          isMainPushPluginEnabled(plugin.name, enabledMainPushPluginNames.value)
 
         if (isMainPush) {
           mainPushItems.push({
@@ -913,12 +938,14 @@ export const useCommandDataStore = defineStore('commandData', () => {
     const requestId = ++loadCommandsRequestId
     loading.value = true
     try {
-      const [rawApps, plugins, disabledPlugins, commandAliases] = await Promise.all([
-        window.ztools.getApps(),
-        window.ztools.getAllPlugins(),
-        window.ztools.getDisabledPlugins(),
-        loadCommandAliases()
-      ])
+      const [rawApps, plugins, disabledPlugins, enabledMainPushPlugins, commandAliases] =
+        await Promise.all([
+          window.ztools.getApps(),
+          window.ztools.getAllPlugins(),
+          window.ztools.getDisabledPlugins(),
+          window.ztools.dbGet(ENABLED_MAIN_PUSH_PLUGINS_KEY),
+          loadCommandAliases()
+        ])
 
       let settingCommands: Command[] = []
       try {
@@ -968,6 +995,7 @@ export const useCommandDataStore = defineStore('commandData', () => {
       }
 
       setDisabledPluginPaths(disabledPlugins)
+      enabledMainPushPluginNames.value = normalizeConfigList(enabledMainPushPlugins)
       rawAppsCache.value = rawApps
       const enabledPluginPaths = getEnabledPluginPaths(plugins)
       enabledPluginsCache.value = plugins.filter((plugin: any) =>
@@ -1350,7 +1378,7 @@ export const useCommandDataStore = defineStore('commandData', () => {
 
   function matchesWindowCommand(
     command: Command,
-    windowInfo?: { app?: string; title?: string } | null
+    windowInfo?: { app?: string; title?: string; className?: string } | null
   ): boolean {
     if (
       !windowInfo ||
@@ -1368,7 +1396,10 @@ export const useCommandDataStore = defineStore('commandData', () => {
         // 直接字符串匹配
         return windowInfo.app === appPattern
       })
-      if (appMatches) {
+      const classNameMatches = windowCmd.match.className?.some(
+        (classNamePattern) => classNamePattern === (windowInfo.className || '')
+      )
+      if (appMatches && (!windowCmd.match.className || classNameMatches)) {
         return true
       }
     }
@@ -1385,7 +1416,11 @@ export const useCommandDataStore = defineStore('commandData', () => {
   }
 
   // 搜索支持窗口的指令（根据当前激活窗口进行匹配）
-  function searchWindowCommands(windowInfo?: { app?: string; title?: string }): SearchResult[] {
+  function searchWindowCommands(windowInfo?: {
+    app?: string
+    title?: string
+    className?: string
+  }): SearchResult[] {
     if (!windowInfo || (!windowInfo.app && !windowInfo.title)) {
       return []
     }

@@ -1,11 +1,37 @@
 import { app, globalShortcut, ipcMain, nativeTheme } from 'electron'
+import fs from 'fs'
 import type { PluginManager } from '../../managers/pluginManager'
+
+// 共享API（主程序和插件都能用）
+import { WindowManager as NativeWindowManager } from '../../core/native/index.js'
 import { getCurrentShortcut, updateShortcut } from '../../index.js'
 
 import doubleTapManager from '../../core/doubleTapManager.js'
 import proxyManager from '../../managers/proxyManager.js'
 import windowManager from '../../managers/windowManager.js'
+import type { GlobalShortcutPreparation } from '../index'
+import api from '../index'
 import databaseAPI from '../shared/database'
+
+/**
+ * 快捷键触发时携带的文件输入
+ */
+interface ShortcutInputFile {
+  path: string
+  name: string
+  isDirectory: boolean
+  isFile?: boolean
+}
+
+/**
+ * 快捷键触发启动链路时使用的输入上下文
+ */
+interface ShortcutLaunchContext {
+  searchQuery: string
+  pastedImage: string | null
+  pastedFiles: ShortcutInputFile[] | null
+  pastedText: string | null
+}
 
 /**
  * 设置管理API - 主程序专用
@@ -24,6 +50,11 @@ export class SettingsAPI {
 
   // 临时快捷键录制相关
   private recordingShortcuts: string[] = []
+  // 全局快捷键配置映射（存储每个快捷键的 autoCopy 等配置）
+  private globalShortcutConfigs: Map<string, { autoCopy: boolean }> = new Map()
+  private globalShortcutKeyboardStateReleasers = new Map<string, () => void>()
+  // 全局快捷键触发流程执行中时，后续触发会被忽略，避免重复复制和重复启动。
+  private isGlobalShortcutTriggering = false
 
   private setupIPC(): void {
     // 主题
@@ -38,11 +69,18 @@ export class SettingsAPI {
     // 快捷键
     ipcMain.handle('update-shortcut', (_event, shortcut: string) => this.updateShortcut(shortcut))
     ipcMain.handle('get-current-shortcut', () => this.getCurrentShortcut())
-    ipcMain.handle('register-global-shortcut', (_event, shortcut: string, target: string) =>
-      this.registerGlobalShortcut(shortcut, target)
+    ipcMain.handle(
+      'register-global-shortcut',
+      (_event, shortcut: string, target: string, autoCopy?: boolean) =>
+        this.registerGlobalShortcut(shortcut, target, autoCopy ?? false)
     )
     ipcMain.handle('unregister-global-shortcut', (_event, shortcut: string) =>
       this.unregisterGlobalShortcut(shortcut)
+    )
+    ipcMain.handle(
+      'update-global-shortcut-config',
+      (_event, shortcut: string, config: { autoCopy: boolean }) =>
+        this.updateGlobalShortcutConfig(shortcut, config)
     )
 
     // 应用快捷键
@@ -128,7 +166,11 @@ export class SettingsAPI {
         for (const shortcut of shortcuts) {
           if (shortcut.enabled && shortcut.shortcut && shortcut.target) {
             try {
-              this.registerGlobalShortcut(shortcut.shortcut, shortcut.target)
+              await this.registerGlobalShortcut(
+                shortcut.shortcut,
+                shortcut.target,
+                shortcut.autoCopy ?? false
+              )
             } catch (error) {
               console.error(`注册全局快捷键失败: ${shortcut.shortcut}`, error)
             }
@@ -216,15 +258,31 @@ export class SettingsAPI {
     return shortcut.split('+')[0]
   }
 
-  // 注册全局快捷键
-  public registerGlobalShortcut(shortcut: string, target: string): any {
+  /**
+   * 注册全局快捷键。
+   * 触发时会按需采集当前外部应用中的选中文本，再把上下文交给上层统一处理。
+   */
+  public async registerGlobalShortcut(
+    shortcut: string,
+    target: string,
+    autoCopy: boolean = false
+  ): Promise<any> {
+    console.log(`[Settings] 注册全局快捷键: ${shortcut} -> ${target}, autoCopy: ${autoCopy}`)
+
     try {
+      // 存储快捷键配置
+      this.globalShortcutConfigs.set(shortcut, { autoCopy })
+      console.log('[Settings] 快捷键配置已存储到 Map')
+
+      this.ensureGlobalShortcutKeyboardState(shortcut)
+      const preparation = await api.prepareGlobalShortcut(target)
+
       if (this.isDoubleTapShortcut(shortcut)) {
         const modifier = this.getDoubleTapModifier(shortcut)
         doubleTapManager.unregister(modifier)
         doubleTapManager.register(modifier, () => {
           console.log(`双击修饰键触发: ${shortcut} -> ${target}`)
-          this.handleGlobalShortcut(target)
+          void this.triggerGlobalShortcut(shortcut, preparation)
         })
         console.log(`成功注册双击修饰键快捷键: ${shortcut} -> ${target}`)
         return { success: true }
@@ -235,16 +293,20 @@ export class SettingsAPI {
 
       const success = globalShortcut.register(shortcut, () => {
         console.log(`全局快捷键触发: ${shortcut} -> ${target}`)
-        this.handleGlobalShortcut(target)
+        void this.triggerGlobalShortcut(shortcut, preparation)
       })
 
       if (!success) {
+        this.releaseGlobalShortcutKeyboardState(shortcut)
+        this.globalShortcutConfigs.delete(shortcut)
         return { success: false, error: '快捷键注册失败，可能已被其他应用占用' }
       }
 
       console.log(`成功注册全局快捷键: ${shortcut} -> ${target}`)
       return { success: true }
     } catch (error: unknown) {
+      this.releaseGlobalShortcutKeyboardState(shortcut)
+      this.globalShortcutConfigs.delete(shortcut)
       console.error('[Settings] 注册全局快捷键失败:', error)
       return { success: false, error: error instanceof Error ? error.message : '未知错误' }
     }
@@ -253,6 +315,9 @@ export class SettingsAPI {
   // 注销全局快捷键
   public unregisterGlobalShortcut(shortcut: string): any {
     try {
+      this.releaseGlobalShortcutKeyboardState(shortcut)
+      this.globalShortcutConfigs.delete(shortcut)
+
       if (this.isDoubleTapShortcut(shortcut)) {
         const modifier = this.getDoubleTapModifier(shortcut)
         doubleTapManager.unregister(modifier)
@@ -269,19 +334,217 @@ export class SettingsAPI {
     }
   }
 
-  // 处理全局快捷键触发
-  // 注意：实际的启动逻辑在 APIManager 中处理，这里只是触发回调
-  private handleGlobalShortcut(target: string): void {
-    // 调用外部设置的回调
+  /**
+   * 更新全局快捷键的配置（如 autoCopy）
+   * 仅更新配置，不重新注册快捷键
+   */
+  public updateGlobalShortcutConfig(shortcut: string, config: { autoCopy: boolean }): any {
+    try {
+      console.log(`[Settings] 更新全局快捷键配置: ${shortcut}, autoCopy: ${config.autoCopy}`)
+      this.globalShortcutConfigs.set(shortcut, config)
+      console.log('[Settings] 配置更新成功')
+      return { success: true }
+    } catch (error: unknown) {
+      console.error('[Settings] 更新全局快捷键配置失败:', error)
+      return { success: false, error: error instanceof Error ? error.message : '未知错误' }
+    }
+  }
+
+  /**
+   * 为已注册的全局快捷键持有键盘状态监听。
+   * 这样触发时可以直接读取完整的按键释放状态，不必临时启动监听。
+   */
+  private ensureGlobalShortcutKeyboardState(shortcut: string): void {
+    this.releaseGlobalShortcutKeyboardState(shortcut)
+    this.globalShortcutKeyboardStateReleasers.set(shortcut, doubleTapManager.acquireKeyboardState())
+  }
+
+  /**
+   * 释放某个全局快捷键持有的键盘状态监听引用。
+   */
+  private releaseGlobalShortcutKeyboardState(shortcut: string): void {
+    const release = this.globalShortcutKeyboardStateReleasers.get(shortcut)
+    if (!release) {
+      return
+    }
+
+    release()
+    this.globalShortcutKeyboardStateReleasers.delete(shortcut)
+  }
+
+  /**
+   * 处理全局快捷键的统一触发入口。
+   * 仅在目标命令需要文本上下文时才会执行复制取词，避免无关快捷键产生副作用。
+   */
+  private async triggerGlobalShortcut(
+    shortcut: string,
+    preparation: GlobalShortcutPreparation
+  ): Promise<void> {
+    if (!this.shouldTriggerGlobalShortcut(preparation.target)) {
+      console.log(`[Settings] 上一次全局快捷键流程未完成，忽略本次触发: ${shortcut}`)
+      return
+    }
+
+    this.isGlobalShortcutTriggering = true
+
+    try {
+      // 读取该快捷键的 autoCopy 配置，默认 false
+      const config = this.globalShortcutConfigs.get(shortcut)
+      const autoCopy = config?.autoCopy ?? false
+
+      console.log(`[Settings] 快捷键触发: ${shortcut}`)
+      console.log(`[Settings] 指令类型需要文本: ${preparation.shouldCaptureSelectedText}`)
+      console.log(`[Settings] 用户启用自动复制: ${autoCopy}`)
+
+      // 双重判断：指令类型需要文本 AND 用户启用自动复制
+      const shouldCapture = preparation.shouldCaptureSelectedText && autoCopy
+
+      console.log(`[Settings] 最终是否执行取词: ${shouldCapture}`)
+
+      const context = shouldCapture ? await this.captureSelectedTextContext() : undefined
+      await this.handleGlobalShortcut(preparation.target, context)
+    } finally {
+      this.isGlobalShortcutTriggering = false
+    }
+  }
+
+  /**
+   * 判断某个快捷键目标是否允许在阻断期内再次触发。
+   * 若上一次全局快捷键流程尚未完成，直接忽略新的触发，避免重复取词和重复启动。
+   */
+  private shouldTriggerGlobalShortcut(_target: string): boolean {
+    return !this.isGlobalShortcutTriggering
+  }
+
+  /**
+   * 获取当前选中内容并转换成快捷键启动上下文。
+   * 使用 native getSelectedContent() 方法，自动处理剪贴板暂停；调用前需等待修饰键释放。
+   */
+  private async captureSelectedTextContext(): Promise<ShortcutLaunchContext> {
+    console.log('[Settings] 开始捕获选中内容...')
+    try {
+      const modifiersReleased = await doubleTapManager.waitForModifierKeysReleased()
+      if (!modifiersReleased) {
+        console.warn('[Settings] 修饰键未在限定时间内抬起，跳过本次取词')
+        return {
+          searchQuery: '',
+          pastedImage: null,
+          pastedFiles: null,
+          pastedText: null
+        }
+      }
+
+      const contents = NativeWindowManager.getSelectedContent()
+
+      // 防御性检查：确保 contents 是有效数组
+      if (!Array.isArray(contents)) {
+        console.log('[Settings] 未捕获到任何内容 (contents 不是数组)')
+        return {
+          searchQuery: '',
+          pastedImage: null,
+          pastedFiles: null,
+          pastedText: null
+        }
+      }
+
+      console.log('[Settings] 捕获到内容数量:', contents.length)
+
+      // 处理文件内容
+      const fileContent = contents.find((item) => item.type === 'file')
+      if (fileContent && fileContent.type === 'file') {
+        console.log('[Settings] 捕获到文件，数量:', fileContent.data.length)
+        const files = fileContent.data.map((filePath) => {
+          let isDirectory = false
+          try {
+            isDirectory = fs.statSync(filePath).isDirectory()
+          } catch (e) {
+            // 忽略读取失败的情况，默认设为 false
+            console.warn(`[Settings] 无法读取文件状态: ${filePath}`, e)
+          }
+          return {
+            path: filePath,
+            name: filePath.split(/[/\\]/).pop() || '',
+            isDirectory,
+            isFile: !isDirectory
+          }
+        })
+        return {
+          searchQuery: '',
+          pastedImage: null,
+          pastedFiles: files,
+          pastedText: null
+        }
+      }
+
+      // 处理图片内容
+      const imageContent = contents.find((item) => item.type === 'image')
+      if (imageContent && imageContent.type === 'image') {
+        console.log('[Settings] 捕获到图片')
+        return {
+          searchQuery: '',
+          pastedImage: imageContent.data,
+          pastedFiles: null,
+          pastedText: null
+        }
+      }
+
+      // 处理文本内容
+      const textContent = contents.find((item) => item.type === 'text')
+      if (textContent && textContent.type === 'text') {
+        const text = textContent.data
+        console.log('[Settings] 捕获到文本，长度:', text.length)
+        if (text.trim()) {
+          console.log('[Settings] 文本捕获成功')
+          return {
+            searchQuery: text,
+            pastedImage: null,
+            pastedFiles: null,
+            pastedText: text
+          }
+        } else {
+          console.log('[Settings] 文本为空')
+        }
+      }
+
+      console.log('[Settings] 未捕获到任何内容')
+    } catch (error) {
+      console.error('[Settings] 获取选中内容失败:', error)
+    }
+
+    return {
+      searchQuery: '',
+      pastedImage: null,
+      pastedFiles: null,
+      pastedText: null
+    }
+  }
+
+  /**
+   * 处理全局快捷键触发。
+   * 兼容普通全局快捷键和双击修饰键快捷键，统一向上层传递目标与上下文。
+   */
+  private async handleGlobalShortcut(
+    target: string,
+    context?: ShortcutLaunchContext
+  ): Promise<void> {
     if (this.onGlobalShortcutTriggered) {
-      this.onGlobalShortcutTriggered(target)
+      await this.onGlobalShortcutTriggered(target, context)
     }
   }
 
   // 外部回调（由 APIManager 设置）
-  private onGlobalShortcutTriggered?: (target: string) => void
+  private onGlobalShortcutTriggered?: (
+    target: string,
+    context?: ShortcutLaunchContext
+  ) => void | Promise<void>
 
-  public setGlobalShortcutHandler(handler: (target: string) => void): void {
+  /**
+   * 设置全局快捷键触发后的统一回调。
+   * 上层可根据目标命令和上下文完成最终启动。
+   */
+  public setGlobalShortcutHandler(
+    handler: (target: string, context?: ShortcutLaunchContext) => void | Promise<void>
+  ): void {
     this.onGlobalShortcutTriggered = handler
   }
 

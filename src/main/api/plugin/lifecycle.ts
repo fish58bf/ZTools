@@ -36,9 +36,6 @@ export class PluginLifecycleAPI {
         return false
       }
 
-      // 发送插件退出事件（isKill=false 表示正常退出）
-      event.sender.send('plugin-out', false)
-
       this.pluginManager?.hidePluginView()
       windowManager.notifyBackToSearch()
       // 主窗口获取焦点（确保前端的 focus() 调用能生效）
@@ -47,6 +44,8 @@ export class PluginLifecycleAPI {
       if (isKill) {
         return this.pluginManager?.killPlugin(pluginInfo.path)
       } else {
+        // 发送插件退出事件（isKill=false 表示正常退出）
+        event.sender.send('plugin-out', false)
         return true
       }
     })

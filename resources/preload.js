@@ -231,20 +231,6 @@ function replayPendingPluginEnterIfNeeded() {
 // 获取操作系统类型
 const osType = electron.ipcRenderer.sendSync('get-os-type')
 
-// Sharp 图像处理库（懒加载，仅在首次调用时加载）
-let _sharp = null
-function getSharp() {
-  if (!_sharp) {
-    try {
-      _sharp = require('sharp')
-    } catch (err) {
-      console.error('[ZTools] Sharp 加载失败:', err.message)
-      throw new Error('Sharp 图像处理库加载失败，请确保已正确安装')
-    }
-  }
-  return _sharp
-}
-
 // ── zbrowser 客户端工厂（每次调用 getter 返回新实例）──
 
 /**
@@ -539,7 +525,10 @@ window.ztools = {
   // 显示文件保存对话框
   showSaveDialog: (options) => electron.ipcRenderer.sendSync('show-save-dialog', options),
   // 显示文件打开对话框
-  showOpenDialog: (options) => electron.ipcRenderer.sendSync('show-open-dialog', options),
+  showOpenDialog: (options) => {
+    const data = electron.ipcRenderer.sendSync('show-open-dialog', options)
+    return data
+  },
   // 屏幕截图
   screenCapture: async (callback) => {
     const { image, bounds } = await electron.ipcRenderer.invoke('screen-capture')
@@ -834,6 +823,12 @@ window.ztools = {
     setPluginDisabled: async (pluginPath, disabled) =>
       await electron.ipcRenderer.invoke('internal:set-plugin-disabled', pluginPath, disabled),
     getAllPlugins: async () => await electron.ipcRenderer.invoke('internal:get-all-plugins'),
+    setPluginMainPushEnabled: async (pluginName, enabled) =>
+      await electron.ipcRenderer.invoke(
+        'internal:set-plugin-main-push-enabled',
+        pluginName,
+        enabled
+      ),
     selectPluginFile: async () => await electron.ipcRenderer.invoke('internal:select-plugin-file'),
     importPlugin: async () => await electron.ipcRenderer.invoke('internal:import-plugin'),
     getDevProjects: async () => await electron.ipcRenderer.invoke('internal:get-dev-projects'),
@@ -905,6 +900,10 @@ window.ztools = {
       await electron.ipcRenderer.invoke('internal:get-plugin-doc-keys', pluginRef),
     getPluginDoc: async (pluginRef, docKey) =>
       await electron.ipcRenderer.invoke('internal:get-plugin-doc', pluginRef, docKey),
+    deletePluginDoc: async (pluginRef, docKey) =>
+      await electron.ipcRenderer.invoke('internal:delete-plugin-doc', pluginRef, docKey),
+    exportPluginDoc: async (pluginRef, docKey) =>
+      await electron.ipcRenderer.invoke('internal:export-plugin-doc', pluginRef, docKey),
     getPluginDataStats: async () =>
       await electron.ipcRenderer.invoke('internal:get-plugin-data-stats'),
     clearPluginData: async (pluginRef) =>
@@ -914,14 +913,15 @@ window.ztools = {
       await electron.ipcRenderer.invoke('internal:get-plugin-memory-info', pluginPath),
 
     // ==================== 全局快捷键 API ====================
-    registerGlobalShortcut: async (shortcut, target) =>
-      await electron.ipcRenderer.invoke('internal:register-global-shortcut', shortcut, target),
+    registerGlobalShortcut: async (shortcut, target, autoCopy) =>
+      await electron.ipcRenderer.invoke('register-global-shortcut', shortcut, target, autoCopy),
     unregisterGlobalShortcut: async (shortcut) =>
-      await electron.ipcRenderer.invoke('internal:unregister-global-shortcut', shortcut),
-    startHotkeyRecording: async () =>
-      await electron.ipcRenderer.invoke('internal:start-hotkey-recording'),
+      await electron.ipcRenderer.invoke('unregister-global-shortcut', shortcut),
+    updateGlobalShortcutConfig: async (shortcut, config) =>
+      await electron.ipcRenderer.invoke('update-global-shortcut-config', shortcut, config),
+    startHotkeyRecording: async () => await electron.ipcRenderer.invoke('start-hotkey-recording'),
     updateShortcut: async (shortcut) =>
-      await electron.ipcRenderer.invoke('internal:update-shortcut', shortcut),
+      await electron.ipcRenderer.invoke('update-shortcut', shortcut),
     getCurrentShortcut: async () => await electron.ipcRenderer.invoke('get-current-shortcut'),
     onHotkeyRecorded: (callback) => {
       if (callback && typeof callback === 'function') {
@@ -1101,18 +1101,6 @@ window.ztools = {
         await electron.ipcRenderer.invoke('internal:ai-models-delete', modelId)
     },
 
-    // ==================== 网页快开 API ====================
-    webSearch: {
-      getAll: async () => await electron.ipcRenderer.invoke('internal:web-search-get-all'),
-      add: async (engine) => await electron.ipcRenderer.invoke('internal:web-search-add', engine),
-      update: async (engine) =>
-        await electron.ipcRenderer.invoke('internal:web-search-update', engine),
-      delete: async (engineId) =>
-        await electron.ipcRenderer.invoke('internal:web-search-delete', engineId),
-      fetchFavicon: async (url) =>
-        await electron.ipcRenderer.invoke('internal:web-search-fetch-favicon', url)
-    },
-
     // ==================== 悬浮球 API ====================
     setFloatingBallEnabled: async (enabled) =>
       await electron.ipcRenderer.invoke('floating-ball:set-enabled', enabled),
@@ -1166,9 +1154,6 @@ window.ztools = {
       }
     }
   },
-
-  // Sharp 图像处理
-  sharp: (input, options) => getSharp()(input, options),
 
   // ── zbrowser / ubrowser 浏览器自动化 API ──
 

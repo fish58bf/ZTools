@@ -6,7 +6,6 @@ import { promisify } from 'util'
 import { GLOBAL_SCROLLBAR_CSS } from '../../core/globalStyles'
 import { screenCapture } from '../../core/screenCapture'
 import windowManager from '../../managers/windowManager'
-import webSearchAPI from './webSearch'
 import databaseAPI from '../shared/database'
 import { ColorPicker } from '../../core/native/index.js'
 import { getExplorerFolderPathFromWindow } from '../../utils/common'
@@ -165,11 +164,11 @@ export async function executeSystemCommand(
 
     case 'search':
     case 'bing-search':
-      // 旧的硬编码搜索已迁移到网页快开，保留向后兼容
+      // 旧的硬编码搜索指令，保留向后兼容
       if (command === 'search') {
-        return handleWebSearch(ctx, param, 'https://www.baidu.com/s?wd={q}', '百度搜索')
+        return handleTemplateSearch(ctx, param, 'https://www.baidu.com/s?wd={q}', '百度搜索')
       }
-      return handleWebSearch(ctx, param, 'https://www.bing.com/search?q={q}', '必应搜索')
+      return handleTemplateSearch(ctx, param, 'https://www.bing.com/search?q={q}', '必应搜索')
 
     case 'open-url':
       return handleOpenUrl(ctx, param)
@@ -196,10 +195,6 @@ export async function executeSystemCommand(
       return handleAddToWakeupBlacklist(ctx)
 
     default:
-      // 处理网页快开搜索引擎 (web-search-{id})
-      if (command.startsWith('web-search-')) {
-        return handleDynamicWebSearch(ctx, param, command)
-      }
       return { success: false, error: `Unknown system command: ${command}` }
   }
 
@@ -254,7 +249,7 @@ function handleClearHistory(ctx: SystemCommandContext): any {
   }
 }
 
-async function handleWebSearch(
+async function handleTemplateSearch(
   ctx: SystemCommandContext,
   param: any,
   urlTemplate: string,
@@ -270,19 +265,6 @@ async function handleWebSearch(
     return { success: true }
   }
   return { success: false, error: '缺少搜索关键词' }
-}
-
-async function handleDynamicWebSearch(
-  ctx: SystemCommandContext,
-  param: any,
-  featureCode: string
-): Promise<any> {
-  console.log('[SystemCmd] 执行网页快开搜索:', featureCode, param)
-  const engine = await webSearchAPI.getEngineByFeatureCode(featureCode)
-  if (!engine) {
-    return { success: false, error: '未找到搜索引擎配置' }
-  }
-  return handleWebSearch(ctx, param, engine.url, engine.name)
 }
 
 async function handleScreenshot(ctx: SystemCommandContext): Promise<any> {
@@ -718,23 +700,25 @@ function handleAddToWakeupBlacklist(ctx: SystemCommandContext): any {
   const blacklist: Array<{ app: string; bundleId?: string; label?: string }> =
     settings.wakeupBlacklist ?? []
 
+  const appName = winInfo.app
+
   // 去重：macOS 按 bundleId，Windows 按 app 名称
   const isDuplicate =
     process.platform === 'darwin' && winInfo.bundleId
       ? blacklist.some((item) => item.bundleId === winInfo.bundleId)
-      : blacklist.some((item) => item.app.toLowerCase() === winInfo.app.toLowerCase())
+      : blacklist.some((item) => item.app.toLowerCase() === appName.toLowerCase())
 
   if (isDuplicate) {
     ctx.mainWindow?.hide()
     if (Notification.isSupported()) {
-      new Notification({ title: 'ZTools', body: `${winInfo.app} 已在唤醒黑名单中` }).show()
+      new Notification({ title: 'ZTools', body: `${appName} 已在唤醒黑名单中` }).show()
     }
     return { success: false, error: '该应用已在唤醒黑名单中' }
   }
 
-  const label = winInfo.app.replace(/\.(exe|app)$/i, '')
+  const label = appName.replace(/\.(exe|app)$/i, '')
   blacklist.push({
-    app: winInfo.app,
+    app: appName,
     bundleId: winInfo.bundleId,
     label
   })
