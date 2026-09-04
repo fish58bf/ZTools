@@ -18,6 +18,8 @@ import type { PluginManager } from '../managers/pluginManager.js'
 import { applyWindowMaterial, getDefaultWindowMaterial } from '../utils/windowUtils.js'
 import providerManager from './provider/providerManager.js'
 import { filterSuperPanelPinnedCommands } from './superPanelPinnedCommands.js'
+import globalInputManager from './globalInputManager.js'
+import { UiohookKey } from 'uiohook-napi'
 import { decodeFileUrlToPath } from '../utils/common'
 import { shouldKeepMainWindowHiddenForLaunch } from '../../shared/pluginLaunch'
 
@@ -46,6 +48,7 @@ interface SuperPanelConfig {
   enabled: boolean
   mouseButton: 'middle' | 'right' | 'back' | 'forward'
   longPressMs: number
+  requireCtrl: boolean
   blockedApps: BlockedApp[]
 }
 
@@ -65,8 +68,11 @@ class SuperPanelManager {
     enabled: false,
     mouseButton: 'middle',
     longPressMs: 500,
+    requireCtrl: false,
     blockedApps: []
   }
+  private ctrlHeld = false
+  private ctrlTrackingActive = false
 
   /**
    * 初始化超级面板管理器。
@@ -92,6 +98,7 @@ class SuperPanelManager {
           enabled: data.superPanelEnabled ?? false,
           mouseButton: data.superPanelMouseButton ?? 'middle',
           longPressMs: data.superPanelLongPressMs ?? 500,
+          requireCtrl: data.superPanelRequireCtrl ?? false,
           blockedApps: data.superPanelBlockedApps ?? []
         }
         if (this.config.enabled) {
@@ -107,11 +114,17 @@ class SuperPanelManager {
   /**
    * 设置变更时调用（从设置页面触发）
    */
-  updateConfig(config: { enabled: boolean; mouseButton: string; longPressMs: number }): void {
+  updateConfig(config: {
+    enabled: boolean
+    mouseButton: string
+    longPressMs: number
+    requireCtrl: boolean
+  }): void {
     this.config = {
       enabled: config.enabled,
       mouseButton: config.mouseButton as SuperPanelConfig['mouseButton'],
       longPressMs: config.longPressMs,
+      requireCtrl: config.requireCtrl ?? false,
       blockedApps: this.config.blockedApps
     }
 
@@ -195,6 +208,8 @@ class SuperPanelManager {
     }
   }
 
+  private static readonly CTRL_INPUT_CONSUMER = 'superPanel-ctrl'
+
   /**
    * 启动鼠标监听
    */
@@ -203,13 +218,19 @@ class SuperPanelManager {
     if (MouseMonitor.isMonitoring) {
       MouseMonitor.stop()
     }
+    this.stopCtrlTracking()
 
     try {
       MouseMonitor.start(this.config.mouseButton, this.config.longPressMs, () => {
         return this.onMouseTrigger()
       })
+
+      if (this.config.requireCtrl) {
+        this.startCtrlTracking()
+      }
+
       console.log(
-        `[SuperPanel] 超级面板鼠标监听已启动: ${this.config.mouseButton}, ${this.config.longPressMs}ms`
+        `[SuperPanel] 超级面板鼠标监听已启动: ${this.config.mouseButton}, ${this.config.longPressMs}ms, requireCtrl=${this.config.requireCtrl}`
       )
     } catch (error) {
       console.error('[SuperPanel] 启动超级面板鼠标监听失败:', error)
@@ -224,6 +245,34 @@ class SuperPanelManager {
       MouseMonitor.stop()
       console.log('[SuperPanel] 超级面板鼠标监听已停止')
     }
+    this.stopCtrlTracking()
+  }
+
+  private startCtrlTracking(): void {
+    if (this.ctrlTrackingActive) return
+    this.ctrlHeld = false
+    globalInputManager.on(SuperPanelManager.CTRL_INPUT_CONSUMER, 'keydown', (e) => {
+      if (e.keycode === UiohookKey.Ctrl || e.keycode === UiohookKey.CtrlRight) {
+        this.ctrlHeld = true
+      }
+    })
+    globalInputManager.on(SuperPanelManager.CTRL_INPUT_CONSUMER, 'keyup', (e) => {
+      if (e.keycode === UiohookKey.Ctrl || e.keycode === UiohookKey.CtrlRight) {
+        this.ctrlHeld = false
+      }
+    })
+    if (globalInputManager.acquire(SuperPanelManager.CTRL_INPUT_CONSUMER)) {
+      this.ctrlTrackingActive = true
+      console.log('[SuperPanel] Ctrl 按键追踪已启动')
+    }
+  }
+
+  private stopCtrlTracking(): void {
+    if (!this.ctrlTrackingActive) return
+    globalInputManager.release(SuperPanelManager.CTRL_INPUT_CONSUMER)
+    this.ctrlTrackingActive = false
+    this.ctrlHeld = false
+    console.log('[SuperPanel] Ctrl 按键追踪已停止')
   }
 
   // 当前剪贴板内容（在模拟复制后读取）
@@ -269,6 +318,11 @@ class SuperPanelManager {
    */
   private onMouseTrigger(): MouseMonitorResult {
     try {
+      // 0. 检查是否需要 Ctrl 修饰键
+      if (this.config.requireCtrl && !this.ctrlHeld) {
+        return { shouldBlock: false }
+      }
+
       // 1. 记录鼠标位置
       const cursorPoint = screen.getCursorScreenPoint()
 

@@ -1324,7 +1324,10 @@ export class InternalPluginAPI {
     // ==================== 超级面板 API ====================
     ipcMain.handle(
       'internal:update-super-panel-config',
-      async (event, config: { enabled: boolean; mouseButton: string; longPressMs: number }) => {
+      async (
+        event,
+        config: { enabled: boolean; mouseButton: string; longPressMs: number; requireCtrl: boolean }
+      ) => {
         if (!requireInternalPlugin(this.pluginManager, event)) {
           throw new PermissionDeniedError('internal:update-super-panel-config')
         }

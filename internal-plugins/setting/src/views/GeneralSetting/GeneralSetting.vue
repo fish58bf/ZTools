@@ -110,7 +110,14 @@ const superPanelMouseButtonOptions = [
   { label: '按下鼠标后退键', value: 'back' },
   { label: '长按鼠标后退键', value: 'back-long' },
   { label: '按下鼠标前进键', value: 'forward' },
-  { label: '长按鼠标前进键', value: 'forward-long' }
+  { label: '长按鼠标前进键', value: 'forward-long' },
+  { label: 'Ctrl+按下鼠标中键', value: 'ctrl-middle' },
+  { label: 'Ctrl+长按鼠标中键', value: 'ctrl-middle-long' },
+  { label: 'Ctrl+长按鼠标右键', value: 'ctrl-right-long' },
+  { label: 'Ctrl+按下鼠标后退键', value: 'ctrl-back' },
+  { label: 'Ctrl+长按鼠标后退键', value: 'ctrl-back-long' },
+  { label: 'Ctrl+按下鼠标前进键', value: 'ctrl-forward' },
+  { label: 'Ctrl+长按鼠标前进键', value: 'ctrl-forward-long' }
 ]
 
 // 当前平台（与 window.ztools.getPlatform 返回类型保持一致）
@@ -208,6 +215,7 @@ const floatingBallDoubleClickCommand = ref('')
 const superPanelEnabled = ref(false)
 const superPanelMouseButton = ref<MouseButtonType>('middle')
 const superPanelLongPressMs = ref(500)
+const superPanelRequireCtrl = ref(false)
 const superPanelBlockedApps = ref<Array<{ app: string; bundleId?: string; label?: string }>>([])
 
 const router = useRouter()
@@ -228,16 +236,17 @@ const superPanelTranslateEnabled = ref(false)
 // 超级面板触发模式（计算属性）
 const superPanelTriggerMode = computed({
   get: () => {
+    const ctrlPrefix = superPanelRequireCtrl.value ? 'ctrl-' : ''
     // 右键特殊处理，如果配置是右键，强制显示为长按右键
     if (superPanelMouseButton.value === 'right') {
-      return 'right-long'
+      return `${ctrlPrefix}right-long`
     }
     // 如果长按时间大于0，显示为长按模式
     if (superPanelLongPressMs.value > 0) {
-      return `${superPanelMouseButton.value}-long`
+      return `${ctrlPrefix}${superPanelMouseButton.value}-long`
     }
     // 否则显示为短按模式
-    return superPanelMouseButton.value
+    return `${ctrlPrefix}${superPanelMouseButton.value}`
   },
   set: () => {
     // 这里的 setter 主要用于 v-model 绑定，实际更新逻辑在 handleSuperPanelTriggerModeChange 中
@@ -808,7 +817,8 @@ async function handleSuperPanelEnabledChange(): Promise<void> {
     await window.ztools.internal.updateSuperPanelConfig({
       enabled: superPanelEnabled.value,
       mouseButton: superPanelMouseButton.value,
-      longPressMs: superPanelLongPressMs.value
+      longPressMs: superPanelLongPressMs.value,
+      requireCtrl: superPanelRequireCtrl.value
     })
     console.log('超级面板开关已更新:', superPanelEnabled.value)
   } catch (err) {
@@ -822,30 +832,38 @@ async function handleSuperPanelTriggerModeChange(mode: string | number): Promise
     const triggerMode = String(mode)
     let mouseButton: MouseButtonType
     let longPressMs: number
+    let remaining = triggerMode
+    let requireCtrl = false
 
-    if (triggerMode.endsWith('-long')) {
+    if (remaining.startsWith('ctrl-')) {
+      requireCtrl = true
+      remaining = remaining.slice(5)
+    }
+
+    if (remaining.endsWith('-long')) {
       // 长按模式
-      mouseButton = triggerMode.replace('-long', '') as MouseButtonType
-      // 如果之前的长按时间太短或为0，设置为默认200ms
+      mouseButton = remaining.replace('-long', '') as MouseButtonType
       longPressMs =
         superPanelLongPressMs.value && superPanelLongPressMs.value >= 200
           ? superPanelLongPressMs.value
           : 200
     } else {
       // 短按模式
-      mouseButton = triggerMode as MouseButtonType
+      mouseButton = remaining as MouseButtonType
       longPressMs = 0
     }
 
     // 更新本地状态
     superPanelMouseButton.value = mouseButton
     superPanelLongPressMs.value = longPressMs
+    superPanelRequireCtrl.value = requireCtrl
 
     await saveSettings()
     await window.ztools.internal.updateSuperPanelConfig({
       enabled: superPanelEnabled.value,
       mouseButton: superPanelMouseButton.value,
-      longPressMs: superPanelLongPressMs.value
+      longPressMs: superPanelLongPressMs.value,
+      requireCtrl: superPanelRequireCtrl.value
     })
     console.log('超级面板触发模式已更新:', triggerMode)
   } catch (err) {
@@ -866,7 +884,8 @@ async function handleSuperPanelLongPressMsChange(): Promise<void> {
     await window.ztools.internal.updateSuperPanelConfig({
       enabled: superPanelEnabled.value,
       mouseButton: superPanelMouseButton.value,
-      longPressMs: superPanelLongPressMs.value
+      longPressMs: superPanelLongPressMs.value,
+      requireCtrl: superPanelRequireCtrl.value
     })
     console.log('超级面板长按响应时间已更新:', superPanelLongPressMs.value)
   } catch (err) {
@@ -1385,6 +1404,7 @@ async function loadSettings(): Promise<void> {
       superPanelEnabled.value = data.superPanelEnabled ?? false
       superPanelMouseButton.value = data.superPanelMouseButton ?? 'middle'
       superPanelLongPressMs.value = data.superPanelLongPressMs ?? 500
+      superPanelRequireCtrl.value = data.superPanelRequireCtrl ?? false
       superPanelBlockedApps.value = data.superPanelBlockedApps ?? []
       wakeupBlacklist.value = data.wakeupBlacklist ?? []
       ignoreHotkeysOnFullscreen.value = data.ignoreHotkeysOnFullscreen ?? false
@@ -1476,6 +1496,7 @@ async function saveSettings(): Promise<void> {
       superPanelEnabled: superPanelEnabled.value,
       superPanelMouseButton: superPanelMouseButton.value,
       superPanelLongPressMs: superPanelLongPressMs.value,
+      superPanelRequireCtrl: superPanelRequireCtrl.value,
       superPanelBlockedApps: superPanelBlockedApps.value.map((item) => ({ ...item })),
       wakeupBlacklist: wakeupBlacklist.value.map((item) => ({ ...item })),
       ignoreHotkeysOnFullscreen: ignoreHotkeysOnFullscreen.value,

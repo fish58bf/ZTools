@@ -1,0 +1,7 @@
+allowBuilds:
+  electron: false
+  electron-winstaller: false
+  esbuild: false
+  lmdb: false
+  msgpackr-extract: set this to true or false
+  uiohook-napi: false

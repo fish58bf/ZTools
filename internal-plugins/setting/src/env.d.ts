@@ -948,6 +948,7 @@ declare global {
           enabled: boolean
           mouseButton: string
           longPressMs: number
+          requireCtrl: boolean
         }) => Promise<{ success: boolean }>
         updateSuperPanelBlockedApps: (
           blockedApps: Array<{ app: string; bundleId?: string; label?: string }>
