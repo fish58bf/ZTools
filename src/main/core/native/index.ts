@@ -1,6 +1,7 @@
 import os from 'os'
-import { execSync, spawnSync } from 'child_process'
-import { clipboard } from 'electron'
+import path from 'path'
+import { execSync, fork, spawnSync } from 'child_process'
+import { app, clipboard } from 'electron'
 import macZToolsNative from '../../../../resources/lib/mac/ztools_native.node?asset'
 import winZToolsNative from '../../../../resources/lib/win/ztools_native.node?asset'
 
@@ -26,6 +27,28 @@ interface UwpAppInfo {
   installLocation: string
 }
 
+export interface ExplorerLaunchOptions {
+  target: string
+  parameters?: string
+  workingDirectory?: string
+  verb?: string
+  showCommand?: number
+}
+
+export interface ExplorerLaunchResult {
+  success: boolean
+  hresult: number
+  stage: string
+}
+
+export interface WindowsShortcutInfo {
+  name: string
+  path: string
+  icon?: string
+  targetPath?: string
+  sourceType?: 'lnk' | 'url' | 'lnk-url' | string
+}
+
 export interface FileLocationWindowInfo {
   platform?: 'win32' | 'darwin'
   kind?: 'windows-explorer' | 'windows-file-dialog' | 'mac-finder' | 'mac-file-dialog'
@@ -44,6 +67,44 @@ export interface FileLocationWindowInfo {
   url?: string
 }
 
+/** 区域截图选项 */
+export interface ScreenCaptureOptions {
+  /**
+   * 选区确定后直接出图，跳过编辑态（工具栏/标注）。
+   * 默认 true：框选/点选完成即出图；传 false 才进入编辑态。
+   */
+  autoConfirm?: boolean
+}
+
+/** 区域截图结果 */
+export interface ScreenCaptureResult {
+  success: boolean
+  width?: number
+  height?: number
+  /** 截图左上角 x 坐标（成功时，macOS 暂不支持） */
+  x?: number
+  /** 截图左上角 y 坐标（成功时，macOS 暂不支持） */
+  y?: number
+  /** 截图 PNG 的 base64（成功时） */
+  base64?: string
+}
+
+/** UWP 应用激活结果与前台权限诊断信息。 */
+export interface UwpLaunchResult {
+  success: boolean
+  hresult: number
+  foregroundHresult: number
+  foregroundPermissionGranted: boolean
+  processId: number
+  stage: string
+}
+
+/** UWP 包安装、更新或卸载完成事件。 */
+export interface UwpPackageChangeEvent {
+  type: 'install' | 'update' | 'uninstall'
+  packageFullName: string
+}
+
 interface NativeAddon {
   startMonitor: (callback: () => void) => void
   stopMonitor: () => void
@@ -54,8 +115,20 @@ interface NativeAddon {
   activateWindow: (identifier: string | number) => boolean
   simulatePaste: () => boolean
   simulateKeyboardTap: (key: string, ...modifiers: string[]) => boolean
+  ensureOptimizedShortcutListener: (
+    callback: (payload: { shortcut: string; primed: boolean }) => void
+  ) => void
+  stopOptimizedShortcutListener: () => void
+  registerOptimizedShortcut: (shortcut: string) => { success: boolean; error?: string }
+  unregisterOptimizedShortcut: (shortcut: string) => { success: boolean; error?: string }
+  getOptimizedShortcutCount: () => number
+  primeScreenshotFrame: () => boolean
   startRegionCapture: (
     callback: (result: { success: boolean; width?: number; height?: number }) => void
+  ) => void
+  startRegionCaptureWithPrimedFrame: (
+    options: ScreenCaptureOptions,
+    callback: (result: ScreenCaptureResult) => void
   ) => void
   getClipboardFiles: () => ClipboardFile[]
   setClipboardFiles: (files: Array<string | { path: string }>) => boolean
@@ -69,10 +142,19 @@ interface NativeAddon {
     callback: () => void | { shouldBlock?: boolean }
   ) => void
   stopMouseMonitor: () => void
+  startUwpPackageMonitor: (callback: (event: UwpPackageChangeEvent) => void) => void
+  stopUwpPackageMonitor: () => void
+  getUwpPackageSnapshot: () => string[]
   getUwpApps: () => UwpAppInfo[]
-  launchUwpApp: (appId: string) => boolean
+  launchUwpApp: (appId: string) => UwpLaunchResult
+  launchViaExplorer: (options: ExplorerLaunchOptions) => Promise<ExplorerLaunchResult>
   getFileIcon: (filePath: string) => Promise<Buffer>
   resolveMuiStrings: (refs: string[]) => { [ref: string]: string }
+  scanWindowsShortcuts: (
+    scanPaths: string[],
+    rootScanPaths: string[],
+    skipFolders: string[]
+  ) => WindowsShortcutInfo[]
   startColorPicker: (callback: (result: { success: boolean; hex: string | null }) => void) => void
   stopColorPicker: () => void
   /** 通过 Unicode 输入法模拟键入单个字符/字素簇 */
@@ -103,6 +185,7 @@ interface NativeAddon {
     | { type: 'file'; data: string[] }
     | { type: 'image'; data: string }
   >
+  launchCuiShell: (shell: string, workingDirectory: string) => boolean
 }
 
 interface WindowInfo {
@@ -117,6 +200,7 @@ interface WindowInfo {
   y?: number // 窗口 y 坐标
   width?: number // 窗口宽度
   height?: number // 窗口高度
+  isFullscreen?: boolean // macOS 焦点窗口是否处于系统全屏状态
   appPath?: string // 应用路径
   className?: string // Windows 窗口类名（用于区分 CabinetWClass/Progman/WorkerW 等）
   hwnd?: number // Windows 窗口句柄（用于 COM 查询 Explorer 路径）
@@ -130,8 +214,19 @@ interface WindowInfo {
 
 interface ActiveWindowResult {
   app: string
+  appName?: string
   bundleId?: string
   pid?: number
+  processId?: number
+  title?: string
+  x?: number
+  y?: number
+  width?: number
+  height?: number
+  appPath?: string
+  className?: string
+  hwnd?: number
+  isFullscreen?: boolean
   error?: string
 }
 
@@ -342,10 +437,10 @@ export class WindowManager {
   /**
    * 获取当前激活的窗口信息
    * @returns 窗口信息对象
-   * - macOS: { app, bundleId, pid }
-   * - Windows: { app, pid }
+   * - macOS: { app, bundleId, pid, x, y, width, height, isFullscreen }
+   * - Windows: { app, pid, x, y, width, height, className, hwnd, isFullscreen }
    */
-  static getActiveWindow(): { app: string; bundleId?: string; pid?: number } | null {
+  static getActiveWindow(): ActiveWindowResult | null {
     if (platform === 'linux') {
       return null
     }
@@ -770,40 +865,146 @@ export class MouseMonitor {
   }
 }
 
-/**
- * 区域截图类
- */
-export class ScreenCapture {
+export class OptimizedShortcutManager {
+  private static _callback: ((payload: { shortcut: string; primed: boolean }) => void) | null = null
+  private static _isListening = false
+
   /**
-   * 启动区域截图
-   * @param {Function} callback - 截图完成时的回调函数
-   * - 参数: { success: boolean, width?: number, height?: number, x?: number, y?: number }
-   * - success: 是否成功截图
-   * - width: 截图宽度（成功时）
-   * - height: 截图高度（成功时）
-   * - x: 截图左上角 x 坐标（成功时，macOS 暂不支持）
-   * - y: 截图左上角 y 坐标（成功时，macOS 暂不支持）
+   * 启动 native 优化快捷键监听。
    */
-  static start(
-    callback: (result: {
-      success: boolean
-      width?: number
-      height?: number
-      x?: number
-      y?: number
-    }) => void
-  ): void {
-    if (platform === 'darwin') {
-      // macOS 暂不支持
-      throw new Error('ScreenCapture is not yet supported on macOS')
+  static ensureListener(callback: (payload: { shortcut: string; primed: boolean }) => void): void {
+    if (platform !== 'win32') {
+      return
     }
 
     if (typeof callback !== 'function') {
       throw new TypeError('Callback must be a function')
     }
 
-    ;(addon as NativeAddon).startRegionCapture((result) => {
-      callback(result)
+    OptimizedShortcutManager._callback = callback
+    if (OptimizedShortcutManager._isListening) {
+      return
+    }
+
+    try {
+      ;(addon as NativeAddon).ensureOptimizedShortcutListener((payload) => {
+        OptimizedShortcutManager._callback?.(payload)
+      })
+      OptimizedShortcutManager._isListening = true
+    } catch (error) {
+      OptimizedShortcutManager._callback = null
+      OptimizedShortcutManager._isListening = false
+      throw error
+    }
+  }
+
+  /**
+   * 停止 native 优化快捷键监听。
+   */
+  static stopListener(): void {
+    if (platform !== 'win32') {
+      return
+    }
+    if (!OptimizedShortcutManager._isListening) {
+      return
+    }
+
+    ;(addon as NativeAddon).stopOptimizedShortcutListener()
+    OptimizedShortcutManager._isListening = false
+    OptimizedShortcutManager._callback = null
+  }
+
+  /**
+   * 注册一个由 native 接管监听的优化快捷键。
+   */
+  static registerShortcut(shortcut: string): { success: boolean; error?: string } {
+    if (platform !== 'win32') {
+      return { success: false, error: 'optimized shortcut is only supported on Windows' }
+    }
+    return (addon as NativeAddon).registerOptimizedShortcut(shortcut)
+  }
+
+  /**
+   * 注销一个由 native 接管监听的优化快捷键。
+   */
+  static unregisterShortcut(shortcut: string): { success: boolean; error?: string } {
+    if (platform !== 'win32') {
+      return { success: false, error: 'optimized shortcut is only supported on Windows' }
+    }
+    return (addon as NativeAddon).unregisterOptimizedShortcut(shortcut)
+  }
+
+  /**
+   * 获取当前由 native 接管的优化快捷键数量。
+   */
+  static getShortcutCount(): number {
+    if (platform !== 'win32') {
+      return 0
+    }
+    return (addon as NativeAddon).getOptimizedShortcutCount()
+  }
+}
+
+/**
+ * 区域截图类
+ */
+export class ScreenCapture {
+  /**
+   * 预抓取当前虚拟屏幕帧
+   */
+  static prime(): boolean {
+    if (platform === 'darwin') {
+      throw new Error('ScreenCapture is not yet supported on macOS')
+    }
+
+    return (addon as NativeAddon).primeScreenshotFrame()
+  }
+
+  /**
+   * 启动区域截图
+   * @param options 截图选项；直接传函数时按旧签名 start(callback) 处理
+   *   - autoConfirm: 选区确定后直接出图，跳过编辑态（工具栏/标注），默认 true
+   * @param callback 截图完成时的回调函数
+   * - 参数: { success: boolean, width?: number, height?: number, x?: number, y?: number, base64?: string }
+   * - success: 是否成功截图
+   * - width: 截图宽度（成功时）
+   * - height: 截图高度（成功时）
+   * - x: 截图左上角 x 坐标（成功时，macOS 暂不支持）
+   * - y: 截图左上角 y 坐标（成功时，macOS 暂不支持）
+   * - base64: 截图 PNG 的 base64（成功时）
+   *
+   * @example
+   * // 默认：框选/点选完成即出图，不再二次编辑
+   * ScreenCapture.start((result) => { ... });
+   *
+   * // 进入编辑态：选区确定后停留在工具栏，可标注/调整
+   * ScreenCapture.start({ autoConfirm: false }, (result) => { ... });
+   */
+  static start(
+    options: ScreenCaptureOptions | ((result: ScreenCaptureResult) => void),
+    callback?: (result: ScreenCaptureResult) => void
+  ): void {
+    if (platform === 'darwin') {
+      // macOS 暂不支持
+      throw new Error('ScreenCapture is not yet supported on macOS')
+    }
+
+    // 兼容旧签名 start(callback)
+    let opts: ScreenCaptureOptions | undefined
+    let cb: ((result: ScreenCaptureResult) => void) | undefined
+    if (typeof options === 'function') {
+      cb = options
+    } else {
+      opts = options
+      cb = callback
+    }
+
+    if (typeof cb !== 'function') {
+      throw new TypeError('Callback must be a function')
+    }
+
+    ;(addon as NativeAddon).startRegionCaptureWithPrimedFrame(opts ?? {}, (result) => {
+      cb!(result)
     })
   }
 }
@@ -812,6 +1013,49 @@ export class ScreenCapture {
  * UWP 应用管理类
  */
 export class UwpManager {
+  /**
+   * 启动当前用户 UWP 包安装、更新和卸载完成事件监听。
+   *
+   * @param callback 包变化完成时调用的回调函数。
+   * @returns 无返回值。
+   * @throws 当前平台不是 Windows、回调无效或原生监听初始化失败时抛出。
+   */
+  static startPackageMonitor(callback: (event: UwpPackageChangeEvent) => void): void {
+    if (platform !== 'win32') {
+      throw new Error('startPackageMonitor is only supported on Windows')
+    }
+    if (typeof callback !== 'function') {
+      throw new TypeError('Callback must be a function')
+    }
+
+    ;(addon as NativeAddon).startUwpPackageMonitor(callback)
+  }
+
+  /**
+   * 停止当前用户 UWP 包变化监听。
+   *
+   * @returns 无返回值。
+   */
+  static stopPackageMonitor(): void {
+    if (platform === 'win32') {
+      ;(addon as NativeAddon).stopUwpPackageMonitor()
+    }
+  }
+
+  /**
+   * 获取当前用户已注册包的稳定快照。
+   *
+   * @returns 按包完整名排序的快照。
+   * @throws 当前平台不是 Windows 或包注册表不可读时抛出。
+   */
+  static getPackageSnapshot(): string[] {
+    if (platform !== 'win32') {
+      throw new Error('getPackageSnapshot is only supported on Windows')
+    }
+
+    return (addon as NativeAddon).getUwpPackageSnapshot()
+  }
+
   /**
    * 获取已安装的 UWP 应用列表
    * @returns {Array<{name: string, appId: string, icon: string, installLocation: string}>} 应用列表
@@ -830,9 +1074,10 @@ export class UwpManager {
   /**
    * 启动 UWP 应用
    * @param {string} appId - AppUserModelID（从 getUwpApps 获取）
-   * @returns {boolean} 是否启动成功
+   * @returns 启动结果与前台权限诊断信息
+   * @throws 当前平台不是 Windows，或 appId 不是非空字符串时抛出
    */
-  static launchUwpApp(appId: string): boolean {
+  static launchUwpApp(appId: string): UwpLaunchResult {
     if (platform !== 'win32') {
       throw new Error('launchUwpApp is only supported on Windows')
     }
@@ -840,6 +1085,33 @@ export class UwpManager {
       throw new TypeError('appId must be a non-empty string')
     }
     return (addon as NativeAddon).launchUwpApp(appId)
+  }
+}
+
+export class WindowsShellLauncher {
+  static launch(options: ExplorerLaunchOptions): Promise<ExplorerLaunchResult> {
+    if (platform !== 'win32') {
+      throw new Error('launchViaExplorer is only supported on Windows')
+    }
+    if (!options || typeof options.target !== 'string' || options.target.trim() === '') {
+      throw new TypeError('target must be a non-empty string')
+    }
+    for (const field of ['parameters', 'workingDirectory', 'verb'] as const) {
+      const value = options[field]
+      if (value !== undefined && typeof value !== 'string') {
+        throw new TypeError(`${field} must be a string`)
+      }
+    }
+    if (
+      options.showCommand !== undefined &&
+      (!Number.isInteger(options.showCommand) ||
+        options.showCommand < 0 ||
+        options.showCommand > 11)
+    ) {
+      throw new RangeError('showCommand must be an integer between 0 and 11')
+    }
+
+    return (addon as NativeAddon).launchViaExplorer(options)
   }
 }
 
@@ -889,6 +1161,149 @@ export class MuiResolver {
     }
     const result = (addon as NativeAddon).resolveMuiStrings(refs)
     return new Map(Object.entries(result))
+  }
+}
+
+export class WindowsShortcutScanner {
+  /**
+   * 在隔离的 Node 子进程中扫描 Windows 快捷方式。
+   *
+   * @param scanPaths 递归扫描的目录路径。
+   * @param rootScanPaths 仅扫描根层的目录路径。
+   * @param skipFolders 递归时需要跳过的目录名称。
+   * @returns 扫描完成后解析为快捷方式条目数组的 Promise。
+   * @throws 子进程启动失败、超时、native 报错或异常退出时抛出。
+   */
+  static scan(
+    scanPaths: string[],
+    rootScanPaths: string[],
+    skipFolders: string[]
+  ): Promise<WindowsShortcutInfo[]> {
+    if (platform !== 'win32') {
+      throw new Error('WindowsShortcutScanner is only supported on Windows')
+    }
+    if (!Array.isArray(scanPaths) || !Array.isArray(rootScanPaths) || !Array.isArray(skipFolders)) {
+      throw new TypeError('scanPaths, rootScanPaths and skipFolders must be arrays')
+    }
+
+    return new Promise((resolve, reject) => {
+      const runnerStartedAt = process.hrtime.bigint()
+
+      // packaged runner 位于 asarUnpack，开发环境则直接使用仓库 resources。
+      const runnerPath = app.isPackaged
+        ? path.join(
+            process.resourcesPath,
+            'app.asar.unpacked',
+            'resources',
+            'windows-shortcut-scanner-runner.cjs'
+          )
+        : path.join(app.getAppPath(), 'resources', 'windows-shortcut-scanner-runner.cjs')
+      const child = fork(runnerPath, [winZToolsNative], {
+        env: {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: '1'
+        },
+        stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+      })
+      let settled = false
+
+      /**
+       * 统一完成 Promise 并释放 runner，防止多个进程事件重复结算。
+       *
+       * @param error 失败原因；为 null 时使用扫描结果完成。
+       * @param entries 成功时的快捷方式结果。
+       * @param nativeElapsedMs runner 内 native 调用耗时（毫秒）。
+       * @returns 无返回值。
+       */
+      const finish = (
+        error: Error | null,
+        entries: WindowsShortcutInfo[] = [],
+        nativeElapsedMs?: number
+      ): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+
+        // 记录包含进程启动、native 扫描和 IPC 返回在内的完整耗时。
+        const elapsedMs = Number(process.hrtime.bigint() - runnerStartedAt) / 1_000_000
+        const resultLabel = error ? '失败' : `完成，共 ${entries.length} 个条目`
+        const nativeLabel =
+          typeof nativeElapsedMs === 'number'
+            ? `，native 扫描 ${nativeElapsedMs.toFixed(2)} ms`
+            : ''
+        console.log(
+          `[WindowsShortcutScanner] 子进程扫描 ${resultLabel}，总耗时 ${elapsedMs.toFixed(2)} ms${nativeLabel}`
+        )
+
+        child.removeAllListeners('message')
+        child.removeAllListeners('exit')
+        child.stderr?.removeAllListeners()
+
+        // 清理 IPC 时仍保留 error 监听，避免迟到的进程错误成为未处理事件。
+        child.removeAllListeners('error')
+        child.on('error', () => {})
+        if (child.connected) child.disconnect()
+        if (!child.killed) child.kill()
+
+        if (error) {
+          reject(error)
+        } else {
+          resolve(entries)
+        }
+      }
+
+      // OneDrive 或异常 shell 扩展不能无限阻塞应用列表初始化。
+      const timeout = setTimeout(() => {
+        finish(new Error('Windows shortcut scan timed out after 20 seconds'))
+      }, 20_000)
+
+      child.stderr?.on('data', (data: Buffer) => {
+        console.error(`[WindowsShortcutScanner:runner] ${data.toString().trim()}`)
+      })
+
+      child.once('error', (error) => {
+        finish(new Error(`Windows shortcut scanner failed to start: ${error.message}`))
+      })
+
+      child.once('exit', (code, signal) => {
+        finish(
+          new Error(
+            `Windows shortcut scanner exited before returning a result: code=${code}, signal=${signal}`
+          )
+        )
+      })
+
+      child.once('message', (message: unknown) => {
+        if (typeof message !== 'object' || message === null || !('type' in message)) {
+          finish(new Error('Windows shortcut scanner returned an invalid response'))
+          return
+        }
+
+        const response = message as {
+          type: string
+          entries?: WindowsShortcutInfo[]
+          error?: string
+          nativeElapsedMs?: number
+        }
+        if (response.type === 'result' && Array.isArray(response.entries)) {
+          finish(null, response.entries, response.nativeElapsedMs)
+          return
+        }
+
+        finish(
+          new Error(response.error || 'Windows shortcut scanner failed'),
+          [],
+          response.nativeElapsedMs
+        )
+      })
+
+      // 所有监听器和超时保护就绪后再发送请求，避免快速失败事件丢失。
+      child.send({ type: 'scan', scanPaths, rootScanPaths, skipFolders }, (error) => {
+        if (error) {
+          finish(new Error(`Failed to send Windows shortcut scan request: ${error.message}`))
+        }
+      })
+    })
   }
 }
 
@@ -963,6 +1378,31 @@ export class ColorPicker {
    */
   static get isActive(): boolean {
     return ColorPicker._isActive
+  }
+}
+
+export class CuiProcess {
+  static async launchPowerShell(workingDirectory: string): Promise<boolean> {
+    if (platform !== 'win32' || !addon || typeof addon.launchCuiShell !== 'function') {
+      return false
+    }
+    try {
+      return addon.launchCuiShell('powershell', workingDirectory)
+    } catch (err) {
+      console.error('[CuiProcess] Failed to launch PowerShell:', err)
+      return false
+    }
+  }
+  static async launchCmd(workingDirectory: string): Promise<boolean> {
+    if (platform !== 'win32' || !addon || typeof addon.launchCuiShell !== 'function') {
+      return false
+    }
+    try {
+      return addon.launchCuiShell('cmd', workingDirectory)
+    } catch (err) {
+      console.error('[CuiProcess] Failed to launch Cmd:', err)
+      return false
+    }
   }
 }
 

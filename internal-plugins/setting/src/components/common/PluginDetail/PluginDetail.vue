@@ -7,20 +7,33 @@ import PluginDetailToolbar from './PluginDetailToolbar.vue'
 import type { PluginDownloadState, PluginItem, PluginUninstallOptions, TabId } from './types'
 import { usePluginDetail } from './usePluginDetail'
 
-const props = defineProps<{
-  plugin: PluginItem
-  isLoading?: boolean
-  downloadState?: PluginDownloadState
-  isRunning?: boolean
-  // 已安装插件特有
-  isPinned?: boolean
-  isDisabled?: boolean
-  // 功能开关
-  showPinButton?: boolean
-  showDisableToggle?: boolean
-  showComments?: boolean
-  showSize?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    plugin: PluginItem
+    isLoading?: boolean
+    downloadState?: PluginDownloadState
+    isRunning?: boolean
+    // 已安装插件特有
+    isPinned?: boolean
+    isDisabled?: boolean
+    // 功能开关
+    showPinButton?: boolean
+    showDisableToggle?: boolean
+    showDetail?: boolean
+    showCommands?: boolean
+    showComments?: boolean
+    showData?: boolean
+    showSize?: boolean
+    showDownloadCount?: boolean
+    showMarketButton?: boolean
+    initialTab?: TabId
+  }>(),
+  {
+    showDetail: true,
+    showCommands: true,
+    showData: true
+  }
+)
 
 const emit = defineEmits<{
   (e: 'back'): void
@@ -30,6 +43,7 @@ const emit = defineEmits<{
   (e: 'uninstall', options: PluginUninstallOptions): void
   (e: 'kill'): void
   (e: 'open-folder'): void
+  (e: 'open-market'): void
   (e: 'toggle-pin'): void
   (e: 'toggle-disabled', disabled: boolean): void
   (e: 'tab-switch', tabId: TabId): void
@@ -80,7 +94,11 @@ const {
 } = usePluginDetail({
   plugin: pluginRef,
   isRunning: isRunningRef,
-  showComments: props.showComments
+  showDetail: props.showDetail,
+  showComments: props.showComments,
+  showCommands: props.showCommands,
+  showData: props.showData,
+  initialTab: props.initialTab
 })
 
 function onSwitchTab(tabId: TabId): void {
@@ -96,11 +114,11 @@ function onSwitchTab(tabId: TabId): void {
         :is-running="isRunning"
         :is-development="plugin.isDevelopment"
         :installed="plugin.installed"
-        :can-upgrade="canUpgrade"
         :is-pinned="isPinned"
         :is-disabled="isDisabled"
         :show-pin-button="showPinButton"
         :show-disable-toggle="showDisableToggle"
+        :show-market-button="showMarketButton"
         :show-settings-dropdown="showSettingsDropdown"
         :is-auto-kill="isAutoKill"
         :is-auto-detach="isAutoDetach"
@@ -110,6 +128,7 @@ function onSwitchTab(tabId: TabId): void {
         @open="emit('open')"
         @kill="emit('kill')"
         @open-folder="emit('open-folder')"
+        @open-market="emit('open-market')"
         @uninstall="handleUninstall((options) => emit('uninstall', options))"
         @toggle-pin="emit('toggle-pin')"
         @toggle-disabled="emit('toggle-disabled', $event)"
@@ -127,6 +146,7 @@ function onSwitchTab(tabId: TabId): void {
       :download-state="downloadState"
       :can-upgrade="canUpgrade"
       :show-size="showSize"
+      :show-download-count="showDownloadCount"
       @download="emit('download')"
       @upgrade="emit('upgrade')"
     >

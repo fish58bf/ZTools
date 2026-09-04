@@ -4,6 +4,19 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '预发布版本号，例如 3.0.0-beta.1'
+        required: true
+      prerelease:
+        description: '是否发布为 GitHub Pre-release'
+        type: boolean
+        default: true
+      publish_release:
+        description: '是否发布到 GitHub Release'
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -21,18 +34,54 @@ jobs:
           - os: macos-15-intel
             arch: x64
             build_cmd: pnpm run build:mac:x64
+            # electron-builder expects the certificate subject without its type prefix.
+            signing_identity: 'Zhengzhou Zhongsen Yunke Information Technology Co., Ltd. (4S4HH8375U)'
           # macOS ARM64 (Apple Silicon)
           - os: macos-14
             arch: arm64
             build_cmd: pnpm run build:mac:arm64
+            signing_identity: 'Zhengzhou Zhongsen Yunke Information Technology Co., Ltd. (4S4HH8375U)'
           # Windows x64
           - os: windows-latest
             arch: x64
             build_cmd: pnpm run build:win
+            signing_identity: ''
 
     steps:
       - name: Check out git repository
         uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="${INPUT_VERSION#v}"
+            prerelease="${INPUT_PRERELEASE:-true}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            prerelease="false"
+          fi
+
+          if [ -z "$version" ]; then
+            echo "Release version is required" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "make_latest=$([ "$prerelease" = "true" ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
+
+      - name: Set package version
+        env:
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+        run: |
+          node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); pkg.version=process.env.RELEASE_VERSION; fs.writeFileSync('package.json', JSON.stringify(pkg,null,2)+'\n');"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v2
@@ -58,9 +107,48 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Prepare App Store Connect API key
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+
+          # Decode the secret only into the ephemeral runner workspace.
+          node -e 'const fs=require("fs"); fs.writeFileSync(process.argv[1], Buffer.from(process.env.APPLE_API_KEY_BASE64, "base64"))' "$key_path"
+
+          test -s "$key_path"
+          grep -q 'BEGIN PRIVATE KEY' "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY=$key_path" >> "$GITHUB_ENV"
+
       # 统一构建命令
       - name: Build and Package
+        env:
+          CSC_LINK: ${{ startsWith(matrix.os, 'macos') && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ startsWith(matrix.os, 'macos') && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          CSC_NAME: ${{ matrix.signing_identity }}
+          APPLE_API_KEY_ID: ${{ startsWith(matrix.os, 'macos') && secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ startsWith(matrix.os, 'macos') && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_TEAM_ID: ${{ startsWith(matrix.os, 'macos') && secrets.APPLE_TEAM_ID || '' }}
         run: ${{ matrix.build_cmd }}
+
+      - name: Verify macOS signature and notarization
+        if: startsWith(matrix.os, 'macos')
+        shell: bash
+        run: |
+          app_path="$(find dist -maxdepth 3 -type d -name '*.app' -print -quit)"
+          if [ -z "$app_path" ]; then
+            echo 'No macOS app bundle found in dist/' >&2
+            exit 1
+          fi
+
+          # Verify the complete nested bundle before artifacts are uploaded.
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          xcrun stapler validate "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
 
       # 上传平台产物（只上传指定文件类型）
       - name: Upload build artifacts
@@ -71,16 +159,53 @@ jobs:
             dist/*.exe
             dist/*.dmg
             dist/*.zip
+            dist/*.yml
+            dist/*.blockmap
           if-no-files-found: warn
 
   release:
     name: Release
     needs: build
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.publish_release }}
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release_meta.outputs.tag }}
 
     steps:
       - name: Check out git repository
         uses: actions/checkout@v4
+
+      - name: Resolve release metadata
+        id: release_meta
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="${INPUT_VERSION#v}"
+            prerelease="${INPUT_PRERELEASE:-true}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+            prerelease="false"
+          fi
+
+          if [ -z "$version" ]; then
+            echo "Release version is required" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          echo "make_latest=$([ "$prerelease" = "true" ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
+
+      - name: Set package version
+        env:
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+        run: |
+          node -e "const fs=require('fs'); const pkg=JSON.parse(fs.readFileSync('package.json','utf8')); pkg.version=process.env.RELEASE_VERSION; fs.writeFileSync('package.json', JSON.stringify(pkg,null,2)+'\n');"
 
       - name: Install pnpm
         uses: pnpm/action-setup@v2
@@ -100,146 +225,60 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: artifact-macos-15-intel-x64
-          path: dist
+          path: dist/mac-x64
 
       - name: Download macOS ARM64 artifact
         uses: actions/download-artifact@v4
         with:
           name: artifact-macos-14-arm64
-          path: dist
+          path: dist/mac-arm64
 
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
           name: artifact-windows-latest-x64
-          path: dist
+          path: dist/windows
 
-      # 生成更新信息和下载链接
+      # 合并 macOS 双架构元数据，并规范化 Windows 与 macOS 的更新清单。
       - name: Generate update info
+        env:
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+          WINDOWS_UPDATE_METADATA: dist/windows/latest.yml
+          MAC_X64_UPDATE_METADATA: dist/mac-x64/latest-mac.yml
+          MAC_ARM64_UPDATE_METADATA: dist/mac-arm64/latest-mac.yml
+          UPDATE_METADATA_OUTPUT_DIR: dist/release
+          REQUIRE_UPDATE_METADATA: 'true'
         run: pnpm updater
 
-      # 只上传指定的三类文件到 Release
+      # 上传安装包、标准完整更新包、blockmap 和最终元数据。
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ steps.release_meta.outputs.tag }}
+          tag_name: ${{ steps.release_meta.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ steps.release_meta.outputs.prerelease }}
+          make_latest: ${{ steps.release_meta.outputs.make_latest }}
           body_path: changelog.md
           files: |
-            dist/*.exe
-            dist/*.dmg
-            dist/*.zip
-            latest.yml
+            dist/windows/*.exe
+            dist/windows/*.zip
+            dist/windows/*.blockmap
+            dist/mac-x64/*.dmg
+            dist/mac-x64/*.zip
+            dist/mac-x64/*.blockmap
+            dist/mac-arm64/*.dmg
+            dist/mac-arm64/*.zip
+            dist/mac-arm64/*.blockmap
+            dist/release/*.yml
 
-      # # 安装 ossutil
-      # - name: Setup ossutil
-      #   run: |
-      #     wget https://gosspublic.alicdn.com/ossutil/1.7.18/ossutil-v1.7.18-linux-amd64.zip
-      #     unzip ossutil-v1.7.18-linux-amd64.zip
-      #     chmod +x ossutil-v1.7.18-linux-amd64/ossutil
-      #     sudo mv ossutil-v1.7.18-linux-amd64/ossutil /usr/local/bin/ossutil
-
-      # # 配置 ossutil
-      # - name: Configure ossutil
-      #   run: |
-      #     ossutil config -e oss-cn-beijing.aliyuncs.com -i ${{ secrets.ALIYUN_OSS_ACCESS_KEY_ID }} -k ${{ secrets.ALIYUN_OSS_ACCESS_KEY_SECRET }}
-
-      # # 上传到阿里云 OSS
-      # - name: Upload to Aliyun OSS
-      #   run: |
-      #     # 上传函数，支持重试和超时
-      #     upload_file() {
-      #       local file=$1
-      #       local target=$2
-      #       local allow_overwrite=$3  # true/false
-      #       local max_retries=3
-      #       local timeout=30  # 30秒超时
-
-      #       for i in $(seq 1 $max_retries); do
-      #         echo "  尝试 $i/$max_retries: $(basename "$file")"
-
-      #         # 使用 timeout 命令限制执行时间，添加 --jobs 参数提高上传速度
-      #         if [ "$allow_overwrite" = "true" ]; then
-      #           if timeout $timeout ossutil cp "$file" "$target" -f --jobs 3 2>&1; then
-      #             echo "  ✓ 上传成功: $(basename "$file")"
-      #             return 0
-      #           fi
-      #         else
-      #           if timeout $timeout ossutil cp "$file" "$target" --jobs 3 2>&1; then
-      #             echo "  ✓ 上传成功: $(basename "$file")"
-      #             return 0
-      #           fi
-      #         fi
-
-      #         echo "  ✗ 上传失败，错误码: $?"
-      #         if [ $i -lt $max_retries ]; then
-      #           echo "  等待 5 秒后重试..."
-      #           sleep 5
-      #         fi
-      #       done
-
-      #       echo "  ✗✗✗ $(basename "$file") 上传失败，已重试 $max_retries 次"
-      #       return 1
-      #     }
-
-      #     # 统计
-      #     success_count=0
-      #     fail_count=0
-      #     failed_files=()
-
-      #     # 上传更新包（只上传 update-*.zip 文件）
-      #     echo ""
-      #     echo "========== 开始上传更新包 =========="
-      #     zip_count=$(ls -1 dist/update-*.zip 2>/dev/null | wc -l)
-      #     echo "发现 $zip_count 个更新包"
-
-      #     for file in dist/update-*.zip; do
-      #       if [ -f "$file" ]; then
-      #         target="oss://ztools-center/updater/$(basename "$file")"
-
-      #         upload_file "$file" "$target" "true" || result=$?
-      #         result=${result:-0}
-
-      #         if [ $result -eq 0 ]; then
-      #           success_count=$((success_count + 1))
-      #         else
-      #           fail_count=$((fail_count + 1))
-      #           failed_files+=("$(basename "$file")")
-      #         fi
-
-      #         # 重置 result 变量
-      #         result=0
-      #       fi
-      #     done
-
-      #     # 上传 latest.yml 文件（允许覆盖）
-      #     echo ""
-      #     echo "========== 上传 latest.yml 文件 =========="
-      #     if [ -f "latest.yml" ]; then
-      #       upload_file "latest.yml" "oss://ztools-center/updater/latest.yml" "true" || result=$?
-      #       result=${result:-0}
-      #       if [ $result -eq 0 ]; then
-      #         success_count=$((success_count + 1))
-      #       else
-      #         fail_count=$((fail_count + 1))
-      #         failed_files+=("latest.yml")
-      #       fi
-      #     fi
-
-      #     # 输出结果
-      #     echo ""
-      #     echo "========================================="
-      #     echo "上传完成！"
-      #     echo "成功: $success_count 个文件"
-      #     echo "失败: $fail_count 个文件"
-
-      #     if [ $fail_count -gt 0 ]; then
-      #       echo ""
-      #       echo "失败的文件列表:"
-      #       for failed_file in "${failed_files[@]}"; do
-      #         echo "  - $failed_file"
-      #       done
-      #       echo ""
-      #       echo "⚠️  部分文件上传失败，请检查日志"
-      #       exit 1
-      #     else
-      #       echo "✅ 所有文件已成功上传到阿里云 OSS"
-      #     fi
+      - name: Sync release metadata to ZTools server
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+          ZTOOLS_RELEASE_SYNC_TOKEN: ${{ secrets.ZTOOLS_RELEASE_SYNC_TOKEN }}
+          ZTOOLS_RELEASE_SYNC_URL: https://z-tools.top
+          WINDOWS_UPDATE_METADATA: dist/release/latest.yml
+          MAC_UPDATE_METADATA: dist/release/latest-mac.yml
+        run: node scripts/sync-release-server.mjs

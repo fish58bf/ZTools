@@ -1,7 +1,97 @@
 import { spawn } from 'child_process'
+import path from 'path'
 import { dialog, shell } from 'electron'
-import { UwpManager } from '../native'
+import { UwpManager, WindowsShellLauncher } from '../native'
 import type { ConfirmDialogOptions } from './types'
+
+type ElectronShellFallback = 'openPath' | 'openExternal'
+
+async function openWithElectronShell(
+  appPath: string,
+  fallback: ElectronShellFallback
+): Promise<void> {
+  if (fallback === 'openExternal') {
+    await shell.openExternal(appPath)
+    return
+  }
+
+  const error = await shell.openPath(appPath)
+  if (!error) {
+    return
+  }
+
+  if (appPath.toLowerCase().endsWith('.exe')) {
+    try {
+      await shell.openExternal(appPath)
+      return
+    } catch (externalError) {
+      console.error('[Launcher] openExternal 启动也失败:', externalError)
+    }
+  }
+
+  throw new Error(`启动失败: ${error}`)
+}
+
+/**
+ * 计算可执行文件的工作目录（"启动目录"）。
+ *
+ * ShellExecuteEx 若未显式提供 lpDirectory，则子进程会继承 ZTools 主进程的
+ * 当前工作目录。当 ZTools 以开机自启/提权方式启动时，其工作目录通常是
+ * C:\WINDOWS\system32，导致被启动的程序把相对路径（如 Save 数据目录）
+ * 解析到 system32 下而报权限错误（见 issue #603）。
+ *
+ * 为对齐用户在资源管理器中直接双击 exe 的行为，这里返回 exe 所在目录，
+ * 作为其启动工作目录。仅对带有目录分隔符的 .exe 生效；.lnk 由快捷方式
+ * 自身的“起始位置”决定，故不覆盖。
+ */
+export function resolveLaunchWorkingDirectory(appPath: string): string | undefined {
+  if (!appPath.toLowerCase().endsWith('.exe')) {
+    return undefined
+  }
+  if (!appPath.includes('\\') && !appPath.includes('/')) {
+    return undefined
+  }
+  const dir = path.win32.dirname(appPath)
+  if (!dir || dir === '.' || dir === appPath) {
+    return undefined
+  }
+  return dir
+}
+
+async function openApplicationViaExplorer(
+  appPath: string,
+  fallback: ElectronShellFallback,
+  workingDirectory?: string
+): Promise<void> {
+  try {
+    const result = await WindowsShellLauncher.launch({
+      target: appPath,
+      showCommand: 1,
+      ...(workingDirectory ? { workingDirectory } : {})
+    })
+    if (result.success) {
+      console.log(`[Launcher] 已通过 Explorer 启动: ${appPath}`)
+      return
+    }
+
+    const hresultHex = `0x${(result.hresult >>> 0).toString(16).padStart(8, '0')}`
+    console.warn('[Launcher] Explorer COM 启动失败，回退 Electron Shell:', {
+      target: appPath,
+      hresult: result.hresult,
+      hresultHex,
+      stage: result.stage,
+      fallback
+    })
+  } catch (error) {
+    console.warn('[Launcher] Explorer COM 调用异常，回退 Electron Shell:', {
+      target: appPath,
+      fallback,
+      error
+    })
+  }
+
+  await openWithElectronShell(appPath, fallback)
+}
 
 /**
  * 执行系统命令（不等待进程结束，适用于 GUI 应用）
@@ -36,6 +126,14 @@ function execCommand(command: string, args: string[] = []): void {
   subprocess.unref()
 }
 
+/**
+ * 按目标类型启动 Windows 应用、UWP 应用、协议或系统命令。
+ *
+ * @param appPath 待启动的路径、协议地址或带 uwp: 前缀的 AppUserModelID。
+ * @param confirmDialog 启动前可选的确认对话框配置。
+ * @returns 启动流程完成后的 Promise。
+ * @throws 用户确认后目标启动失败时抛出。
+ */
 export async function launchApp(
   appPath: string,
   confirmDialog?: ConfirmDialogOptions
@@ -64,8 +162,30 @@ export async function launchApp(
   if (appPath.startsWith('uwp:')) {
     const appId = appPath.slice(4)
     try {
-      UwpManager.launchUwpApp(appId)
-      console.log(`[Launcher] 成功启动 UWP 应用: ${appId}`)
+      // native 会在激活前把当前前台权限转交给 UWP 激活管理器。
+      const result = UwpManager.launchUwpApp(appId)
+      if (!result.success) {
+        const hresultHex = `0x${(result.hresult >>> 0).toString(16).padStart(8, '0')}`
+        throw new Error(`UWP 激活失败: stage=${result.stage}, hresult=${hresultHex}`)
+      }
+
+      // 权限转交失败不阻断应用启动，但必须保留诊断信息以排查焦点限制。
+      if (!result.foregroundPermissionGranted) {
+        const foregroundHresultHex = `0x${(result.foregroundHresult >>> 0)
+          .toString(16)
+          .padStart(8, '0')}`
+        console.warn('[Launcher] UWP 已启动，但前台权限转交失败:', {
+          appId,
+          processId: result.processId,
+          foregroundHresult: result.foregroundHresult,
+          foregroundHresultHex
+        })
+      }
+
+      console.log(`[Launcher] 成功启动 UWP 应用: ${appId}`, {
+        processId: result.processId,
+        foregroundPermissionGranted: result.foregroundPermissionGranted
+      })
       return
     } catch (error) {
       console.error('[Launcher] 启动 UWP 应用失败:', error)
@@ -74,11 +194,14 @@ export async function launchApp(
   }
 
   // 检查是否是协议链接（如 ms-settings:, steam://, battlenet:// 等）
-  // 协议链接必须使用 shell.openExternal()，shell.openPath() 会卡住
-  if (/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(appPath) && !appPath.includes('\\')) {
+  // 协议链接失败时必须回退 openExternal，openPath 可能卡住。
+  if (
+    /^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(appPath) &&
+    !appPath.includes('\\') &&
+    !path.win32.isAbsolute(appPath)
+  ) {
     try {
-      await shell.openExternal(appPath)
-      console.log(`[Launcher] 成功打开协议链接: ${appPath}`)
+      await openApplicationViaExplorer(appPath, 'openExternal')
       return
     } catch (error) {
       console.error('[Launcher] 打开协议链接失败:', error)
@@ -148,56 +271,10 @@ export async function launchApp(
     }
   }
 
-  // 系统可执行文件（不包含路径分隔符，说明在 PATH 中）
-  if (ext === 'exe' && !appPath.includes('\\')) {
-    // 对于 PATH 中的可执行文件，使用 shell.openPath（Electron 会自动在 PATH 中查找）
-    // 这是最可靠的方式，避免路径解析问题
-    const error = await shell.openPath(appPath)
-    if (error) {
-      throw new Error(`启动系统命令失败: ${error}`)
-    }
-    console.log(`[Launcher] 成功启动系统命令: ${appPath}`)
+  if (appPath.toLowerCase().endsWith('.exe') || appPath.toLowerCase().endsWith('.lnk')) {
+    await openApplicationViaExplorer(appPath, 'openPath', resolveLaunchWorkingDirectory(appPath))
     return
   }
 
-  // 先尝试使用 shell.openPath()（适用于大多数情况，包括 .lnk 快捷方式）
-  return new Promise((resolve, reject) => {
-    shell
-      .openPath(appPath)
-      .then((error) => {
-        if (error) {
-          console.error('[Launcher] shell.openPath 失败:', error)
-
-          // .lnk 文件如果失败，直接报错（不应该失败）
-          if (appPath.toLowerCase().endsWith('.lnk')) {
-            reject(new Error(`快捷方式启动失败: ${error}`))
-            return
-          }
-
-          // 对于 .exe 文件，尝试使用 shell.openExternal()
-          if (appPath.toLowerCase().endsWith('.exe')) {
-            console.log('[Launcher] 尝试使用 openExternal 启动...')
-            shell
-              .openExternal(appPath)
-              .then(() => {
-                console.log(`[Launcher] 成功启动应用（openExternal）: ${appPath}`)
-                resolve()
-              })
-              .catch((extError) => {
-                console.error('[Launcher] openExternal 启动也失败:', extError)
-                reject(new Error(`启动失败: ${error}`))
-              })
-          } else {
-            reject(new Error(`启动失败: ${error}`))
-          }
-        } else {
-          console.log(`[Launcher] 成功启动应用: ${appPath}`)
-          resolve()
-        }
-      })
-      .catch((error) => {
-        console.error('[Launcher] 启动应用失败:', error)
-        reject(error)
-      })
-  })
+  await openWithElectronShell(appPath, 'openPath')
 }

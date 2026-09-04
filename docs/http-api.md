@@ -53,7 +53,8 @@ API 密钥可在 **设置 → HTTP 服务** 中查看和复制。
 | ---- | ----------- | --------------------------------- |
 | 0    | 200         | 操作成功                          |
 | 401  | 401         | API 密钥无效或未提供              |
-| 404  | 200         | 未知接口路径                      |
+| 404  | 200         | 未知接口路径、插件或功能不存在    |
+| 400  | 200         | 请求参数错误                      |
 | 405  | 405         | 请求方法不允许（仅支持 GET/POST） |
 | 500  | 500         | 服务器内部错误                    |
 
@@ -207,6 +208,77 @@ Authorization: Bearer <API_KEY>
 ```bash
 curl -X POST http://127.0.0.1:36578/api/window/toggle \
   -H "Authorization: Bearer <API_KEY>"
+```
+
+---
+
+### POST /api/plugin/launch — 启动插件
+
+按 `plugin.json` 中的 `name` 和功能 code 启动已安装插件，并按手动启动插件时的参数格式传入 `type` 与 `payload`。
+
+**请求**
+
+```
+POST /api/plugin/launch
+Authorization: Bearer <API_KEY>
+Content-Type: application/json
+```
+
+**入参**
+
+| 字段         | 类型     | 必填 | 说明                                                                                   |
+| ------------ | -------- | ---- | -------------------------------------------------------------------------------------- |
+| `pluginName` | `string` | 是   | 插件 `plugin.json` 中的 `name`                                                         |
+| `code`       | `string` | 是   | 要启动的插件功能 code                                                                  |
+| `type`       | `string` | 否   | 启动类型，支持 `text`、`over`、`regex`、`img`、`files`、`window`，默认 `text`          |
+| `payload`    | `any`    | 否   | 传给插件的内容，与手动启动插件时的 `payload` 含义一致；`type=files` 时可传文件路径数组 |
+
+**请求体示例**
+
+```json
+{
+  "pluginName": "demo-plugin",
+  "code": "open",
+  "type": "text",
+  "payload": "来自 HTTP API 的内容"
+}
+```
+
+文件类型插件也可以传文件路径数组，ZTools 会转换为手动启动插件时一致的文件对象数组。
+
+```json
+{
+  "pluginName": "demo-plugin",
+  "code": "open-files",
+  "type": "files",
+  "payload": ["/Users/me/Desktop/a.txt", "/Users/me/Desktop/images"]
+}
+```
+
+**返回**
+
+```json
+{
+  "code": 0,
+  "message": "操作成功",
+  "data": {
+    "name": "demo-plugin",
+    "title": "Demo 插件",
+    "path": "/path/to/demo-plugin",
+    "result": {
+      "success": true
+    }
+  }
+}
+```
+
+**curl 示例**
+
+```bash
+curl -X POST http://127.0.0.1:36578/api/plugin/launch \
+  -H "Authorization: Bearer <API_KEY>" \
+  -H "Content-Type: application/json" \
+  -d '{"pluginName": "demo-plugin", "code": "open", "type": "text", "payload": "hello"}'
 ```
 
 ---

@@ -1,11 +1,12 @@
 import { createHash } from 'crypto'
-import { app, clipboard, nativeImage } from 'electron'
-import { promises as fs } from 'fs'
+import { clipboard, nativeImage } from 'electron'
+import { existsSync, promises as fs } from 'fs'
 import path from 'path'
 
 import os from 'os'
 import { v4 as uuidv4 } from 'uuid'
 import lmdbInstance from '../core/lmdb/lmdbInstance'
+import { getClipboardPath } from '../core/appData/appDataPaths'
 import {
   hasClipboardFiles,
   readClipboardFilePaths,
@@ -25,6 +26,11 @@ export type LastCopiedContent = {
   timestamp: number
   sequence: number
 }
+
+export type ClipboardWriteContentData =
+  | { type: 'text'; content: string }
+  | { type: 'image'; content: string }
+  | { type: 'file'; content: string | string[] }
 
 // 文件项
 interface FileItem {
@@ -107,11 +113,14 @@ class ClipboardManager {
   private lastCopiedSequence = 0
   private lastCopiedSequenceWaiters = new Map<number, Set<(content: LastCopiedContent) => void>>()
 
+  // 上一次保存到历史的 hash，用于连续重复内容去重
+  private lastSavedHash: string | null = null
+
   // 临时取消剪贴板监听的计时器（防止 paste API 写入剪贴板时自我触发）
   private cancelWatchTimeout: ReturnType<typeof setTimeout> | null = null
 
   constructor() {
-    this.IMAGE_DIR = path.join(app.getPath('userData'), 'clipboard', 'images')
+    this.IMAGE_DIR = path.join(getClipboardPath(), 'images')
     this.clipboardMonitor = new ClipboardMonitor()
     this.windowMonitor = new WindowMonitor()
     this.init()
@@ -230,7 +239,7 @@ class ClipboardManager {
     try {
       let item: Partial<ClipboardItem> | null = null
 
-      // 优先级：文件 > 图片 > 文本
+      // 优先级：文件 > 图片（仅纯图片）> 文本
       // 跨平台文件检测
       let hasFiles = false
       try {
@@ -242,19 +251,45 @@ class ClipboardManager {
 
       if (hasFiles) {
         item = await this.handleFile()
-      } else if (!clipboard.readImage().isEmpty()) {
+      } else if (this.shouldTreatAsImage()) {
         item = await this.handleImage()
       } else {
         item = await this.handleText()
       }
 
       if (item) {
+        // 连续复制相同内容时跳过记录（保留顺序去重）
+        if (item.hash && item.hash === this.lastSavedHash) {
+          console.log('[Clipboard] 连续重复内容，跳过保存:', item.preview)
+          return
+        }
         await this.saveItem(item as ClipboardItem)
+        if (item.hash) {
+          this.lastSavedHash = item.hash
+        }
         // 通知插件剪贴板变化
         pluginManager?.sendPluginMessage('clipboard-change', item)
       }
     } catch (error) {
       console.error('[Clipboard] 处理剪贴板失败:', error)
+    }
+  }
+
+  /**
+   * 判断剪贴板是否应按图片处理。
+   *
+   * Word / WPS 等 Office 应用复制文本时，会额外写入选区的 TIFF/PDF 渲染，
+   * 使 readImage() 非空。这类情况下板上同时存在有效纯文本，应按文本处理。
+   */
+  private shouldTreatAsImage(): boolean {
+    try {
+      if (clipboard.readImage().isEmpty()) {
+        return false
+      }
+      return clipboard.readText().trim().length === 0
+    } catch (error) {
+      console.error('[Clipboard] 检测图片剪贴板失败:', error)
+      return false
     }
   }
 
@@ -787,22 +822,36 @@ class ClipboardManager {
     }
   }
 
-  // 直接写入内容到剪贴板
-  public writeContent(data: { type: 'text' | 'image'; content: string }): boolean {
+  /**
+   * 将文本、图片或文件路径直接写入系统剪贴板。
+   *
+   * @param data 待写入的剪贴板内容，文件类型支持单路径或路径数组
+   * @returns 内容成功写入系统剪贴板时返回 true，否则返回 false
+   */
+  public writeContent(data: ClipboardWriteContentData): boolean {
     try {
       if (data.type === 'text') {
+        // 文本内容必须保持字符串形式，拒绝来自无类型调用方的数组输入。
+        if (typeof data.content !== 'string') {
+          return false
+        }
         clipboard.writeText(data.content)
         return true
       } else if (data.type === 'image') {
-        // 1. 尝试作为 DataURL 处理
+        // 图片内容必须为可解析的字符串，避免数组被隐式转换。
+        if (typeof data.content !== 'string') {
+          return false
+        }
+
+        // 优先按 Data URL 解析图片内容。
         let image = nativeImage.createFromDataURL(data.content)
 
-        // 2. 如果为空，尝试作为文件路径处理
+        // Data URL 无效时尝试将内容作为本地图片路径。
         if (image.isEmpty()) {
           image = nativeImage.createFromPath(data.content)
         }
 
-        // 3. 如果仍为空，尝试作为 Base64 处理
+        // 路径无效时最后尝试将裸 Base64 内容解码为图片。
         if (image.isEmpty()) {
           try {
             image = nativeImage.createFromBuffer(Buffer.from(data.content, 'base64'))
@@ -818,6 +867,21 @@ class ClipboardManager {
 
         console.error('[Clipboard] 无效的图片内容')
         return false
+      } else if (data.type === 'file') {
+        // 统一转换为数组，并过滤空路径、不存在路径及无类型调用方传入的非法成员。
+        const contents = Array.isArray(data.content) ? data.content : [data.content]
+        const filePaths = contents.filter(
+          (filePath): filePath is string =>
+            typeof filePath === 'string' && filePath.trim().length > 0 && existsSync(filePath)
+        )
+
+        // 不允许写入空文件列表，避免清空或污染当前系统剪贴板。
+        if (filePaths.length === 0) {
+          console.error('[Clipboard] 没有可写入剪贴板的有效文件路径')
+          return false
+        }
+
+        return writeClipboardFiles(filePaths)
       }
       return false
     } catch (error) {
@@ -879,18 +943,34 @@ class ClipboardManager {
     return content?.type === 'image' ? (content.data as string) : null
   }
 
-  // 获取最后复制的内容（统一接口）
+  /**
+   * 获取最近复制的内容。
+   * 当未指定 minSequence 时，仅执行被动即时查询，无有效缓存时立即返回 null；
+   * 当指定了 minSequence（如超级面板模拟复制后）时，会轮询等待新序号的复制事件。
+   *
+   * @param timeLimit 可选的时间限制（毫秒），不传或传 0 表示无时间限制。
+   * @param minSequence 可选的最小序号，仅接受晚于该序号的新复制内容。
+   * @returns 最近复制的内容对象；若无有效内容或等待超时则返回 null。
+   */
   public async getLastCopiedContent(
-    timeLimit?: number, // 可选：时间限制（毫秒），不传或传 0 表示无时间限制
-    minSequence?: number // 可选：仅接受晚于该序号的新复制内容
+    timeLimit?: number,
+    minSequence?: number
   ): Promise<LastCopiedContent | null> {
+    // 优先尝试读取当前内存中的有效复制缓存
     const cachedContent = this.getValidLastCopiedContent(timeLimit)
     if (cachedContent && (!minSequence || cachedContent.sequence > minSequence)) {
       console.log('[Clipboard] 获取到有效的最后复制内容，直接返回缓存')
       return cachedContent
     }
 
-    const initialSequence = Math.max(this.lastCopiedContent?.sequence ?? 0, minSequence ?? 0)
+    // 未指定 minSequence 时属于被动查询（如搜索框自动粘贴），未命中缓存立即返回，不进行轮询等待
+    if (minSequence === undefined) {
+      console.log('[Clipboard] 未获取到有效的最后复制内容，不等待直接返回')
+      return null
+    }
+
+    // 主动等待新复制事件（如超级面板划词）
+    const initialSequence = Math.max(this.lastCopiedContent?.sequence ?? 0, minSequence)
     const waitMs =
       timeLimit && timeLimit > 0
         ? Math.min(timeLimit, CLIPBOARD_READY_WAIT_MS)

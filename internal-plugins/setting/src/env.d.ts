@@ -1,6 +1,17 @@
 /// <reference types="vite/client" />
 /// <reference types="@ztools-center/ztools-api-types" />
 
+import type { SearchWallpaperConfig } from '@shared/searchWallpaper'
+import type {
+  AiProviderInput,
+  AiProviderMutationResult,
+  AiProviderStore,
+  OfficialAiProviderStatus,
+  OfficialAiCreditAccount,
+  OfficialAiRechargeOrder,
+  AiRemoteModel
+} from '@shared/aiProviderShared'
+
 declare module '*.vue' {
   import type { DefineComponent } from 'vue'
   const component: DefineComponent<Record<string, never>, Record<string, never>, unknown>
@@ -22,6 +33,7 @@ declare global {
     ztools: {
       // 获取拖放文件的路径（Electron webUtils）
       getPathForFile: (file: File) => string
+      hideMainWindow: (isRestorePreWindow?: boolean) => boolean | Promise<boolean>
 
       internal: {
         // 数据库操作（主程序专用，直接操作 ZTOOLS 命名空间）
@@ -128,6 +140,104 @@ declare global {
           storefront?: any
           error?: string
         }>
+        fetchPluginMarketRecommendations: (limit?: number) => Promise<any[]>
+        fetchPluginMarketComments: (
+          pluginName: string,
+          page?: number,
+          pageSize?: number,
+          anchorId?: number
+        ) => Promise<{
+          success: boolean
+          data?: {
+            items: Array<{
+              id: number
+              pluginName: string
+              uid: string
+              nickname: string
+              avatarUrl?: string
+              parentId?: number | null
+              parent?: {
+                id: number
+                uid: string
+                nickname: string
+                avatarUrl?: string
+                content: string
+                deleted: boolean
+                createdAt: number
+              } | null
+              content: string
+              likeCount: number
+              liked: boolean
+              createdAt: number
+              updatedAt: number
+            }>
+            page: { page: number; pageSize: number; total: number }
+          }
+          error?: string
+          authRequired?: boolean
+        }>
+        createPluginMarketComment: (input: {
+          pluginName: string
+          content: string
+          parentId?: number | null
+        }) => Promise<{
+          success: boolean
+          data?: any
+          error?: string
+          authRequired?: boolean
+        }>
+        togglePluginMarketCommentLike: (commentId: number) => Promise<{
+          success: boolean
+          data?: { liked: boolean; likeCount: number }
+          error?: string
+          authRequired?: boolean
+        }>
+        deletePluginMarketComment: (commentId: number) => Promise<{
+          success: boolean
+          error?: string
+          authRequired?: boolean
+        }>
+        notificationSummary: () => Promise<{
+          success: boolean
+          data?: { unreadCount: number; latestId: number; hasMoreUnread: boolean }
+          error?: string
+        }>
+        notificationList: (
+          beforeId?: number,
+          limit?: number,
+          unreadOnly?: boolean
+        ) => Promise<{
+          success: boolean
+          data?: {
+            items: Array<{
+              id: number
+              type: string
+              title: string
+              content: string
+              level: string
+              payload: Record<string, unknown>
+              read: boolean
+              createdAt: number
+            }>
+            nextBeforeId: number
+            unreadCount: number
+            hasMore: boolean
+            hasMoreUnread: boolean
+          }
+          error?: string
+          authRequired?: boolean
+        }>
+        notificationMarkRead: (
+          id: number
+        ) => Promise<{ success: boolean; error?: string; authRequired?: boolean }>
+        notificationMarkAllRead: () => Promise<{
+          success: boolean
+          error?: string
+          authRequired?: boolean
+        }>
+        notificationArchive: (
+          id: number
+        ) => Promise<{ success: boolean; error?: string; authRequired?: boolean }>
         installPluginFromMarket: (plugin: any) => Promise<{
           success: boolean
           error?: string
@@ -234,7 +344,8 @@ declare global {
         registerGlobalShortcut: (
           shortcut: string,
           target: string,
-          autoCopy?: boolean
+          autoCopy?: boolean,
+          preScreenshotOptimization?: boolean
         ) => Promise<{ success: boolean; error?: string }>
         unregisterGlobalShortcut: (shortcut: string) => Promise<{
           success: boolean
@@ -242,7 +353,7 @@ declare global {
         }>
         updateGlobalShortcutConfig: (
           shortcut: string,
-          config: { autoCopy: boolean }
+          config: { autoCopy: boolean; preScreenshotOptimization: boolean }
         ) => Promise<{ success: boolean; error?: string }>
         registerAppShortcut: (
           shortcut: string,
@@ -257,16 +368,41 @@ declare global {
         // 窗口和设置
         setWindowOpacity: (opacity: number) => Promise<void>
         setWindowDefaultHeight: (height: number) => Promise<void>
+        setCompactMainWindowHeader: (
+          enabled: boolean
+        ) => Promise<{ success: boolean; error?: string }>
         setWindowMaterial: (material: 'mica' | 'acrylic' | 'none') => Promise<{ success: boolean }>
         getWindowMaterial: () => Promise<'mica' | 'acrylic' | 'none'>
         onUpdateWindowMaterial: (callback: (material: 'mica' | 'acrylic' | 'none') => void) => void
         updateAcrylicOpacity: (lightOpacity: number, darkOpacity: number) => Promise<void>
+        updateSearchWallpaper: (
+          wallpaper: SearchWallpaperConfig | null
+        ) => Promise<{ success: boolean }>
         updatePlaceholder: (placeholder: string) => Promise<void>
         selectAvatar: () => Promise<{ success: boolean; path?: string; error?: string }>
+        selectImageFile: () => Promise<{
+          success: boolean
+          path?: string
+          url?: string
+          error?: string
+        }>
+        selectSearchWallpaper: () => Promise<{
+          success: boolean
+          path?: string
+          url?: string
+          width?: number
+          height?: number
+          compressed?: boolean
+          error?: string
+        }>
         updateAvatar: (avatar: string) => Promise<void>
         updateAutoPaste: (autoPaste: string) => Promise<void>
         updateAutoClear: (autoClear: string) => Promise<void>
         updateAutoBackToSearch: (autoBackToSearch: string) => Promise<void>
+        updateHideMainWindowOnPluginEsc: (
+          enabled: boolean
+        ) => Promise<{ success: boolean; error?: string }>
+        updateWindowPositionStrategy: (strategy: string) => Promise<void>
         updateShowRecentInSearch: (showRecentInSearch: boolean) => Promise<void>
         updateMatchRecommendation: (showMatchRecommendation: boolean) => Promise<void>
         updateLocalAppSearch: (enabled: boolean) => Promise<void>
@@ -281,6 +417,8 @@ declare global {
         setTheme: (theme: string) => Promise<void>
         updatePrimaryColor: (primaryColor: string, customColor?: string) => Promise<void>
         setTrayIconVisible: (visible: boolean) => Promise<void>
+        setGameMode: (v: boolean) => Promise<void>
+        setIgnoreHotkeysOnFullscreen: (v: boolean) => Promise<void>
         setFloatingBallEnabled: (enabled: boolean) => Promise<{ success: boolean }>
         setFloatingBallLetter: (letter: string) => Promise<{ success: boolean }>
         getFloatingBallLetter: () => Promise<string>
@@ -303,9 +441,12 @@ declare global {
           hasUpdate: boolean
           latestVersion?: string
           updateInfo?: any
+          migrationRequired?: boolean
+          migrationReasons?: string[]
+          releaseUrl?: string
           error?: string
         }>
-        updaterStartUpdate: (updateInfo: any) => Promise<{
+        updaterStartUpdate: () => Promise<{
           success: boolean
           error?: string
         }>
@@ -345,6 +486,7 @@ declare global {
           add: (type: 'file' | 'folder') => Promise<{ success: boolean; error?: string }>
           addByPath: (filePath: string) => Promise<{ success: boolean; error?: string }>
           delete: (id: string) => Promise<{ success: boolean; error?: string }>
+          deleteWhenNotExist: () => Promise<{ success: boolean; error?: string }>
           open: (path: string) => Promise<{ success: boolean; error?: string }>
           updateAlias: (id: string, alias: string) => Promise<{ success: boolean; error?: string }>
         }
@@ -357,17 +499,48 @@ declare global {
           needsAdaptation: boolean
         }>
 
-        // WebDAV 同步
+        // 数据同步（WebSocket 版）
+        accountGetSession: () => Promise<{
+          success: boolean
+          session?: {
+            serverUrl: string
+            username: string
+            token: string
+            refreshToken?: string
+          } | null
+          error?: string
+        }>
+        accountLogin: (params: {
+          username: string
+          password: string
+          captchaVerifyParam?: string
+        }) => Promise<{
+          success: boolean
+          token?: string
+          refreshToken?: string
+          isNew?: boolean
+          error?: string
+        }>
+        accountSaveSession: (params: {
+          username: string
+          token: string
+          refreshToken?: string
+        }) => Promise<{ success: boolean; error?: string }>
+        accountLogout: () => Promise<{ success: boolean; error?: string }>
+        accountChangePassword: (params: {
+          currentPassword: string
+          newPassword: string
+        }) => Promise<{ success: boolean; error?: string }>
+        accountDelete: () => Promise<{ success: boolean; error?: string }>
         syncGetConfig: () => Promise<{
           success: boolean
           config?: {
+            provider: 'official' | 'private'
             enabled: boolean
             serverUrl: string
-            username: string
-            password: string
             syncInterval: number
             lastSyncTime: number
-            syncPlugins?: boolean
+            deviceId?: string
           }
           error?: string
         }>
@@ -376,56 +549,398 @@ declare global {
           count?: number
           error?: string
         }>
+        syncGetConflictCount: () => Promise<{
+          success: boolean
+          count?: number
+          error?: string
+        }>
+        syncListConflicts: () => Promise<{
+          success: boolean
+          items?: Array<{
+            docId: string
+            winningRev?: string
+            conflictCount: number
+            deleted: boolean
+            lastModified?: number
+          }>
+          error?: string
+        }>
+        syncGetConflictDetail: (docId: string) => Promise<{
+          success: boolean
+          detail?: {
+            docId: string
+            winningRev?: string
+            deleted: boolean
+            winner: any
+            conflicts: any[]
+          }
+          error?: string
+        }>
+        syncResolveConflict: (
+          docId: string,
+          sourceRev: string
+        ) => Promise<{
+          success: boolean
+          rev?: string
+          error?: string
+        }>
         syncStopAutoSync: () => Promise<{
           success: boolean
           error?: string
         }>
-        syncTestConnection: (config: {
+        syncTestConnection: (config: { serverUrl: string }) => Promise<{
+          success: boolean
+          error?: string
+        }>
+        syncGetCaptchaConfig: (params: { serverUrl: string }) => Promise<{
+          success: boolean
+          config?: {
+            enabled: boolean
+            prefix?: string
+            sceneId?: string
+            encryptedSceneId?: string
+            region?: string
+          }
+          error?: string
+        }>
+        syncLogin: (params: {
+          serverUrl: string
+          username: string
+          password: string
+          captchaVerifyParam?: string
+        }) => Promise<{
+          success: boolean
+          token?: string
+          refreshToken?: string
+          isNew?: boolean
+          error?: string
+        }>
+        syncLoginPrivate: (params: {
           serverUrl: string
           username: string
           password: string
         }) => Promise<{
           success: boolean
+          token?: string
+          refreshToken?: string
+          isNew?: boolean
+          error?: string
+        }>
+        syncLogoutPrivate: () => Promise<{
+          success: boolean
           error?: string
         }>
         syncSaveConfig: (config: {
+          provider?: 'official' | 'private'
           enabled: boolean
           serverUrl: string
-          username: string
-          password: string
           syncInterval: number
-          syncPlugins?: boolean
         }) => Promise<{
+          success: boolean
+          error?: string
+        }>
+        syncGetState: () => Promise<{
+          state: string
+        }>
+        syncGetStatus: () => Promise<{
+          success: boolean
+          status?: {
+            config?: {
+              enabled: boolean
+              serverUrl: string
+              token: string
+              refreshToken?: string
+              syncInterval: number
+              lastSyncTime: number
+              deviceId: string
+              username?: string
+            } | null
+            profile?: {
+              provider: 'official' | 'private'
+              enabled: boolean
+              serverUrl: string
+              syncInterval: number
+              lastSyncTime: number
+              deviceId?: string
+            }
+            state: string
+            loggedIn: boolean
+            username: string
+            lastSyncTime: number
+            unsyncedCount: number
+            conflictCount: number
+            retryStatus?: {
+              pendingPushBatches: number
+              pendingUploads: number
+              pendingDownloads: number
+              failedPermanent: number
+              authRequired: number
+              lastError?: string
+              nextRetryAt?: number
+            } | null
+            officialAccount?: { loggedIn: boolean; username: string }
+            privateSession?: {
+              loggedIn: boolean
+              serverUrl: string
+              username: string
+            }
+          }
+          error?: string
+        }>
+        syncGetDefaultImportStatus: () => Promise<{
+          success: boolean
+          status?: {
+            pending: boolean
+            uid: string | null
+            defaultDocCount: number
+            targetDocCount: number
+            skipped: boolean
+            imported: boolean
+          }
+          error?: string
+        }>
+        syncImportDefaultData: () => Promise<{
+          success: boolean
+          result?: {
+            importedDocs: number
+            importedAttachments: number
+          }
+          error?: string
+        }>
+        syncSkipDefaultImport: () => Promise<{
+          success: boolean
+          error?: string
+        }>
+        syncGetRetryStatus: () => Promise<{
+          success: boolean
+          status?: {
+            pendingPushBatches: number
+            pendingUploads: number
+            pendingDownloads: number
+            failedPermanent: number
+            authRequired: number
+            lastError?: string
+            nextRetryAt?: number
+          } | null
+          error?: string
+        }>
+        syncGetAccountStats: () => Promise<{
+          success: boolean
+          stats?: {
+            documentCount: number
+            attachmentCount: number
+            storageBytes: number
+            monthlyTraffic: number
+          }
+          error?: string
+        }>
+        syncGetAccountCredits: () => Promise<{
+          success: boolean
+          credits?: OfficialAiCreditAccount
+          error?: string
+        }>
+        syncGetAICheckinStatus: () => Promise<{
+          success: boolean
+          checkin?: import('@shared/aiProviderShared').OfficialAiCheckinStatus
+          error?: string
+        }>
+        syncAICheckin: () => Promise<{
+          success: boolean
+          checkin?: import('@shared/aiProviderShared').OfficialAiCheckinStatus
+          error?: string
+        }>
+        syncCreateAIRechargeOrder: (amount: string) => Promise<{
+          success: boolean
+          order?: OfficialAiRechargeOrder
+          error?: string
+        }>
+        syncGetAIRechargeOrder: (orderId: string) => Promise<{
+          success: boolean
+          order?: OfficialAiRechargeOrder
+          error?: string
+        }>
+        syncOpenAIRechargeURL: (paymentUrl: string) => Promise<{
+          success: boolean
+          error?: string
+        }>
+        syncCloseAIRechargeWindow: () => Promise<{
+          success: boolean
+          error?: string
+        }>
+        syncGetAccountProfile: () => Promise<{
+          success: boolean
+          profile?: {
+            uid: string
+            nickname?: string
+            avatarUrl?: string
+          }
+          error?: string
+        }>
+        syncUploadAccountAvatar: (avatarPath: string) => Promise<{
+          success: boolean
+          profile?: {
+            uid: string
+            nickname?: string
+            avatarUrl?: string
+          }
+          error?: string
+        }>
+        syncUpdateNickname: (params: { nickname: string }) => Promise<{
+          success: boolean
+          profile?: {
+            uid: string
+            nickname?: string
+            avatarUrl?: string
+          }
+          error?: string
+        }>
+        syncGithubInitSession: (params: { serverUrl: string }) => Promise<{
+          success: boolean
+          sessionId?: string
+          expiresIn?: number
+          error?: string
+        }>
+        syncGithubOpenBrowser: (params: { serverUrl: string; sessionId: string }) => Promise<{
+          success: boolean
+          error?: string
+        }>
+        syncGithubPollStatus: (params: { serverUrl: string; sessionId: string }) => Promise<{
+          success: boolean
+          status?: 'pending' | 'success'
+          token?: string
+          refreshToken?: string
+          username?: string
+          isNew?: boolean
+          error?: string
+        }>
+        syncRetryNow: () => Promise<{
           success: boolean
           error?: string
         }>
         syncPerformSync: () => Promise<{
           success: boolean
-          result?: {
-            uploaded: number
-            downloaded: number
-            errors: number
-            pluginsUploaded?: number
-            pluginsDownloaded?: number
-            pluginsDeleted?: number
-          }
           error?: string
         }>
-        syncForceDownloadFromCloud: () => Promise<{
+        syncForcePushAll: () => Promise<{
           success: boolean
-          result?: {
-            downloaded: number
-            errors: number
-          }
           error?: string
         }>
+        syncResetLocalSyncState: () => Promise<{
+          success: boolean
+          documentsQueued?: number
+          tasksCleared?: number
+          error?: string
+        }>
+        onSyncStatusChanged?: (
+          callback: (payload: {
+            state?: string
+            retryStatus?: any
+            lastSyncTime?: number
+            lastError?: string
+            credentialsInvalidated?: boolean
+            accountCredentialsInvalidated?: boolean
+            refresh?: boolean
+          }) => void
+        ) => () => void
+        onSyncAccountStorageChanged?: (
+          callback: (payload: { username?: string | null }) => void
+        ) => () => void
 
-        // AI 模型管理
-        aiModels: {
-          getAll: () => Promise<{ success: boolean; data?: any[]; error?: string }>
-          add: (model: any) => Promise<{ success: boolean; error?: string }>
-          update: (model: any) => Promise<{ success: boolean; error?: string }>
+        // AI 供应商管理
+        aiProviders: {
+          getAll: () => Promise<{ success: boolean; data?: AiProviderStore; error?: string }>
+          getOfficial: () => Promise<{
+            success: boolean
+            data?: OfficialAiProviderStatus
+            error?: string
+          }>
+          add: (provider: AiProviderInput) => Promise<AiProviderMutationResult>
+          update: (provider: AiProviderInput) => Promise<AiProviderMutationResult>
+          delete: (providerId: string) => Promise<AiProviderMutationResult>
+          setEnabled: (providerId: string, enabled: boolean) => Promise<AiProviderMutationResult>
+          fetchModels: (
+            apiUrl: string,
+            apiKey: string
+          ) => Promise<{ success: boolean; data?: AiRemoteModel[]; error?: string }>
+        }
+
+        // Provider（翻译 / OCR 等）管理
+        providers: {
+          getAll: (type?: 'translation' | 'ocr') => Promise<{
+            success: boolean
+            data?: Array<{
+              id: string
+              type: 'translation' | 'ocr'
+              label: string
+              description: string
+              source: 'builtin' | 'plugin'
+              pluginName?: string
+              pluginPath?: string
+              pluginLogo?: string
+            }>
+            error?: string
+          }>
+          getSettings: () => Promise<{
+            success: boolean
+            data?: {
+              enabled: Partial<Record<'translation' | 'ocr', string[]>>
+              defaultId: Partial<Record<'translation' | 'ocr', string>>
+              params: Record<string, Record<string, unknown>>
+            }
+            error?: string
+          }>
+          setEnabled: (
+            providerId: string,
+            enabled: boolean
+          ) => Promise<{
+            success: boolean
+            data?: {
+              enabled: Partial<Record<'translation' | 'ocr', string[]>>
+              defaultId: Partial<Record<'translation' | 'ocr', string>>
+              params: Record<string, Record<string, unknown>>
+            }
+            error?: string
+          }>
+          setDefault: (
+            type: 'translation' | 'ocr',
+            providerId: string
+          ) => Promise<{
+            success: boolean
+            data?: {
+              enabled: Partial<Record<'translation' | 'ocr', string[]>>
+              defaultId: Partial<Record<'translation' | 'ocr', string>>
+              params: Record<string, Record<string, unknown>>
+            }
+            error?: string
+          }>
+          getParams: (
+            providerId: string
+          ) => Promise<{ success: boolean; data?: Record<string, unknown>; error?: string }>
+          setParams: (
+            providerId: string,
+            params: Record<string, unknown>
+          ) => Promise<{ success: boolean; data?: any; error?: string }>
+          // 翻译引擎（内置 Bergamot）状态与总开关
+          getTranslationStatus: () => Promise<{
+            status: 'idle' | 'downloading' | 'initializing' | 'ready' | 'error'
+            error?: string
+          }>
+          setTranslationEnabled: (enabled: boolean) => Promise<{ success: boolean }>
+        }
+
+        // 网页快开
+        webSearch: {
+          getAll: () => Promise<{
+            success: boolean
+            data?: WebSearchEngine[]
+            error?: string
+          }>
+          add: (engine: WebSearchEngine) => Promise<{ success: boolean; error?: string }>
+          update: (engine: WebSearchEngine) => Promise<{ success: boolean; error?: string }>
           delete: (id: string) => Promise<{ success: boolean; error?: string }>
+          fetchFavicon: (
+            url: string
+          ) => Promise<{ success: boolean; data?: string; error?: string }>
         }
 
         // 超级面板

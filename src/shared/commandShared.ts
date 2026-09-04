@@ -1,3 +1,5 @@
+import { HOST_STORAGE_KEYS } from './storageKeys'
+
 /**
  * 可参与 commandId 计算的最小指令字段集合
  */
@@ -30,9 +32,11 @@ export type CommandAliasStore = Record<string, CommandAliasEntry[]>
  * 指令别名在主程序数据库中的存储 key
  * 设置插件和主窗口渲染进程都会通过该 key 读取同一份映射
  */
-export const COMMAND_ALIASES_KEY = 'command-aliases'
+export const COMMAND_ALIASES_KEY = HOST_STORAGE_KEYS.commandAliases
 export const DIRECT_APP_ALIAS_GROUP_KEY = '__direct_app__'
 export const DIRECT_APP_ALIAS_GROUP_TITLE = '系统应用'
+export const LOCAL_SHORTCUT_ALIAS_GROUP_KEY = '__local_shortcut__'
+export const LOCAL_SHORTCUT_ALIAS_GROUP_TITLE = '本地启动项'
 
 function normalizeDirectAppPath(path?: string): string {
   return (path || '').replace(/\\/g, '/')
@@ -51,6 +55,13 @@ export function getCommandId(cmd: CommandIdLike): string {
     const normalizedPath = normalizeDirectAppPath(cmd.path)
     if (normalizedPath) {
       return `direct:app:${normalizedPath}`
+    }
+  }
+
+  if (cmd.type === 'direct' && cmd.subType === 'local-shortcut') {
+    const normalizedPath = normalizeDirectAppPath(cmd.path)
+    if (normalizedPath) {
+      return `direct:local-shortcut:${normalizedPath}`
     }
   }
 

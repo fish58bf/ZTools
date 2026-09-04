@@ -5,6 +5,7 @@ import detachedWindowManager from '../../core/detachedWindowManager'
 import databaseAPI from '../shared/database'
 import windowManager from '../../managers/windowManager'
 import pluginWindowManager from '../../core/pluginWindowManager'
+import { buildPluginThemeScript, type PluginThemeState } from '../../core/pluginTheme'
 import { registerPluginApiServices } from './pluginApiDispatcher'
 
 /**
@@ -61,17 +62,32 @@ export class PluginUIAPI {
     // 隐藏插件
     ipcMain.on('hide-plugin', () => this.hidePlugin())
 
-    // 插件 ESC 按键事件（由插件 preload 通过 JS 拦截后上报）
-    ipcMain.on('plugin-esc-pressed', () => {
-      if (this.pluginManager && typeof this.pluginManager.handlePluginEsc === 'function') {
-        this.pluginManager.handlePluginEsc()
-      }
-    })
+    // 插件 ESC 按键事件（同步返回是否接管，供 preload 决定是否阻止系统默认行为）。
+    ipcMain.on('plugin-esc-pressed', (event) => this.handlePluginEscPressed(event))
 
     // 获取是否深色主题
     ipcMain.on('is-dark-colors', (event) => {
       event.returnValue = nativeTheme.shouldUseDarkColors
     })
+  }
+
+  /**
+   * 处理插件页面上报的 ESC，并同步告知 preload 是否已由宿主接管。
+   * @param event 插件 preload 发起的同步 IPC 事件。
+   * @returns 无返回值；处理结果通过 event.returnValue 返回。
+   */
+  private handlePluginEscPressed(event: Electron.IpcMainEvent): void {
+    const settings = databaseAPI.dbGet('settings-general') || {}
+    const escShortcutEnabled = settings?.builtinAppShortcutsEnabled?.esc !== false
+    if (!escShortcutEnabled || !this.pluginManager) {
+      // 未接管时明确返回 false，让插件和系统继续处理该 ESC。
+      event.returnValue = false
+      return
+    }
+
+    // 先执行宿主退出策略，再确认该按键已经被完整处理。
+    this.pluginManager.handlePluginEsc()
+    event.returnValue = true
   }
 
   private showNotification(event: Electron.IpcMainInvokeEvent, body: string): void {
@@ -332,7 +348,7 @@ export class PluginUIAPI {
     const settings = databaseAPI.dbGet('settings-general')
     return {
       isDark: nativeTheme.shouldUseDarkColors,
-      primaryColor: settings?.primaryColor || 'blue',
+      primaryColor: settings?.primaryColor || 'green',
       customColor: settings?.customColor,
       windowMaterial: windowManager.getWindowMaterial()
     }
@@ -365,6 +381,30 @@ export class PluginUIAPI {
   public broadcastThemeInfoToAllPlugins(): void {
     const themeInfo = this.buildThemeInfo()
     this.broadcastToAllPluginViews('update-theme-info', themeInfo)
+    // 主题广播同时直接更新页面变量，确保未订阅 onThemeChange 的插件也能适配主题色。
+    void this.applyThemeToAllPluginViews(themeInfo)
+  }
+
+  /**
+   * 直接更新所有已加载插件页面的主题色 CSS 变量。
+   * @param themeInfo 宿主当前完整主题信息。
+   * @returns 所有目标页面完成执行后的 Promise。
+   */
+  private async applyThemeToAllPluginViews(themeInfo: PluginThemeState): Promise<void> {
+    const script = buildPluginThemeScript(themeInfo)
+    const tasks: Promise<unknown>[] = []
+    // 更新主窗口中缓存的插件视图。
+    const views = this.pluginManager?.getAllPluginViews() || []
+    for (const { view } of views) {
+      if (!view.webContents.isDestroyed() && !view.webContents.isLoadingMainFrame()) {
+        // 捕获窗口销毁竞态导致的同步异常，避免主题广播被单个窗口中断。
+        tasks.push(Promise.resolve().then(() => view.webContents.executeJavaScript(script, true)))
+      }
+    }
+    await Promise.allSettled(tasks)
+    // 更新分离窗口和插件自建窗口中的内容页面。
+    await detachedWindowManager.executeJavaScriptOnPluginViews(script)
+    await pluginWindowManager.executeJavaScriptOnAllWindows(script)
   }
 
   /**

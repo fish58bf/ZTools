@@ -1,37 +1,44 @@
-# 2.6.1
+# 3.2.0
 
 ## 新功能 (Feat)
 
-- 插件详情新增「关闭搜索栏推送」开关，可按插件禁用搜索框推送结果（PR [#520](../../pull/520)，感谢 [@guopenghui](https://github.com/guopenghui) 的贡献 🎉）
-- 全局快捷键新增自动复制选中文本开关（PR [#521](../../pull/521)，感谢 [@Particaly](https://github.com/Particaly) 的贡献 🎉）
-- 插件市场 banner 和分类图标改为本地资源加载，减少远程资源依赖
-- 更新 Electron 版本
-- 更新内置原生模块
+- 插件市场添加排行榜
+- AI 模型编辑界面优化，支持直接使用 ZTools 官方模型
+- ZTools官方模型显示活动支持签到获取AI积分
+- 搜索框支持将 Tab 按键事件传递给插件（PR [#657](../../pull/657)，感谢 [@guopenghui](https://github.com/guopenghui) 的贡献 🎉）
+- 通用设置新增「紧凑顶部栏」，缩小主搜索框和插件顶部栏以显示更多内容
+- 通用设置新增「插件内 ESC 直接隐藏」，在插件中按 ESC 可直接隐藏主窗口，并在下次唤出时返回搜索
+- 更新窗口支持最小化，并保留当前更新状态（PR [#627](../../pull/627)，感谢 [@Hillindigo](https://github.com/Hillindigo) 的贡献 🎉）
+- 账号设置支持修改密码，修改成功后会退出当前登录并要求使用新密码重新登录
+- AI 供应商支持 OpenAI Chat Completions、Anthropic Messages 和 OpenAI Responses 接口协议（PR [#635](../../pull/635)，感谢 [@Particaly](https://github.com/Particaly) 的贡献 🎉）
+- AI 模型配置支持设置上下文、图片输入能力、推理协议、默认思考深度及供应商协议值
+- 使用全局快捷键或超级面板启动声明了 `mainHide` 的插件指令时，不再短暂唤出主窗口
+- 内置截图支持通过 `autoConfirm=false` 进入编辑态，并返回截图图像和区域信息（PR [#631](../../pull/631)，感谢 [@Particaly](https://github.com/Particaly) 的贡献 🎉）
+- 新增 `ztools.startDrag` 插件 API，支持将单个或多个文件拖动到外部应用（PR [#649](../../pull/649)，感谢 [@guopenghui](https://github.com/guopenghui) 的贡献 🎉）
+- 新增 `ztools.getPath('pluginData')` 插件 API，为每个插件提供自动创建的专属数据目录；清空插件数据或卸载时可一并清理（PR [#650](../../pull/650)，感谢 [@Particaly](https://github.com/Particaly) 的贡献 🎉）
+- Windows 支持长截图
 
 ## 修复 (Fix)
 
-- 修复位置位移窗口内部坍塌
-- 修复点击主窗口外原生菜单项目主窗口关闭
-- 修复插件打开系统文件对话框时主窗口被隐藏的问题（PR [#518](../../pull/518)，感谢 [@jn12-29](https://github.com/jn12-29) 的贡献 🎉）
-- 修复 Windows 下文件管理器成为前台窗口时当前窗口数据被错误切换的问题（PR [#517](../../pull/517)，感谢 [@Flinglin](https://github.com/Flinglin) 的贡献 🎉）
-- 修复 Windows「复制路径」系统指令在部分文件管理器窗口中无法匹配的问题（PR [#517](../../pull/517)，感谢 [@Flinglin](https://github.com/Flinglin) 的贡献 🎉）
-- 修复全局快捷键取词等待时间过长的问题（PR [#521](../../pull/521)，感谢 [@Particaly](https://github.com/Particaly) 的贡献 🎉）
-- 修复取词时文件优先级低于图片和文本的问题
-- 加强插件文件对话框期间的窗口 blur 处理，避免对话框关闭后窗口状态异常
+- 修复 Windows 下唤出搜索窗口时偶发抖动的问题（PR [#654](../../pull/654)，感谢 [@guopenghui](https://github.com/guopenghui) 的贡献 🎉）
+- 修复 Windows 上部分系统 EXE 无法通过本地启动项打开的问题（PR [#653](../../pull/653)，感谢 [@guopenghui](https://github.com/guopenghui) 的贡献 🎉）
+- 修改登录用户昵称和头像后其他电脑进入未刷新
+- 更新窗口链接暗色显示问题、链接跳转问题
+- uwp应用图标失
+- win 应用扫描超时
 
 ## 优化 (Optimize)
 
-- 优化插件市场默认地址配置
-- 优化全局快捷键取词流程，使用原生 `getSelectedContent` 替代剪贴板轮询
-- 优化 `getSelectedContent` 类型安全和防御性（PR [#525](../../pull/525)，感谢 [@pantao](https://github.com/pantao) 的贡献 🎉）
-- 增加插件搜索栏推送配置相关测试覆盖
+- 设置插件 二级页面时Esc按键返回到上级页面
 
 ## 重构 (Refactor)
 
-无
+- 清理旧版 AI 调用实现，统一多协议适配、流式传输与请求状态处理
 
 ## 其他 (Chore)
 
-- 更新项目文档中的 Electron 版本说明
+- 修复 README 中 Star 历史图表的链接并切换至新域名（PR [#638](../../pull/638)，感谢 [@Dessalines39394](https://github.com/Dessalines39394) 的贡献 🎉）
+- 开发模式开启主进程调试端口和 Source Map，便于调试主进程（PR [#652](../../pull/652)，感谢 [@guopenghui](https://github.com/guopenghui) 的贡献 🎉）
+- 补充 AI 多协议、紧凑顶部栏、插件 ESC 隐藏、插件专属数据目录和更新窗口最小化等自动化测试覆盖
 
 ---

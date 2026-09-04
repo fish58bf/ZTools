@@ -9,9 +9,13 @@ export interface PluginMarketSettingJumpFunction {
    */
   payload?: string
   /**
-   * 类型
+   * 类型：over 表示填入搜索框，detail 表示打开插件详情
    */
-  type?: string
+  type?: 'over' | 'detail' | string
+  /** 详情打开后需要切换到的标签。 */
+  tab?: 'comments'
+  /** 留言标签中需要定位的评论标识。 */
+  commentId?: number
 }
 
 /**

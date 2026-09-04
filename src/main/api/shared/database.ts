@@ -2,6 +2,8 @@ import { ipcMain, IpcMainEvent, IpcMainInvokeEvent } from 'electron'
 import type { PluginManager } from '../../managers/pluginManager'
 import lmdbInstance from '../../core/lmdb/lmdbInstance'
 import pluginWindowManager from '../../core/pluginWindowManager'
+import { getPluginDataPath } from '../../core/appData/appDataPaths'
+import { physicalFs } from '../../utils/physicalFs'
 import {
   getPluginDataPrefix,
   isDevelopmentPluginName,
@@ -55,6 +57,14 @@ export class DatabaseAPI {
     const pluginName = pluginWindowManager.getPluginNameByWebContentsId(event.sender.id)
     if (pluginName) {
       return getPluginDataPrefix(pluginName)
+    }
+
+    const partition = (event.sender.session as any)?.partition
+    if (typeof partition === 'string' && partition.startsWith('persist:')) {
+      const partitionPluginName = partition.slice('persist:'.length)
+      if (partitionPluginName) {
+        return getPluginDataPrefix(partitionPluginName)
+      }
     }
 
     return null
@@ -154,7 +164,6 @@ export class DatabaseAPI {
       if (prefix) {
         id = prefix + id
       }
-      console.log('[Database] on db:post-attachment', id, attachment, type)
       const result = lmdbInstance.postAttachment(id, attachment, type)
       // 如果是插件调用，需要去除返回结果中的前缀
       if (prefix && result.id && result.id.startsWith(prefix)) {
@@ -169,7 +178,6 @@ export class DatabaseAPI {
         id = prefix + id
       }
       const result = lmdbInstance.getAttachment(id)
-      console.log('[Database] on db:get-attachment', id, 'result', result)
       event.returnValue = result
     })
 
@@ -178,7 +186,6 @@ export class DatabaseAPI {
       if (prefix) {
         id = prefix + id
       }
-      console.log('[Database] on db:get-attachment-type', id)
       event.returnValue = lmdbInstance.getAttachmentType(id)
     })
 
@@ -275,7 +282,6 @@ export class DatabaseAPI {
       if (prefix) {
         id = prefix + id
       }
-      console.log('[Database] handle db:post-attachment', id, attachment, type)
       const result = await lmdbInstance.promises.postAttachment(id, attachment, type)
       // 如果是插件调用，需要去除返回结果中的前缀
       if (prefix && result.id && result.id.startsWith(prefix)) {
@@ -290,7 +296,6 @@ export class DatabaseAPI {
         id = prefix + id
       }
       const result = await lmdbInstance.promises.getAttachment(id)
-      console.log('[Database] handle db:get-attachment', id, 'result', result)
       return result
     })
 
@@ -299,7 +304,6 @@ export class DatabaseAPI {
       if (prefix) {
         id = prefix + id
       }
-      console.log('[Database] handle db:get-attachment-type', id)
       return await lmdbInstance.promises.getAttachmentType(id)
     })
 
@@ -426,6 +430,15 @@ export class DatabaseAPI {
     } catch (error) {
       console.error('[Database] dbGet 失败:', key, error)
       return null
+    }
+  }
+
+  public dbRemove(key: string): any {
+    try {
+      return lmdbInstance.remove(`ZTOOLS/${key}`)
+    } catch (error) {
+      console.error('[Database] dbRemove 失败:', key, error)
+      throw error
     }
   }
 
@@ -633,7 +646,7 @@ export class DatabaseAPI {
   }
 
   /**
-   * 清空指定插件的所有数据（供内部调用）
+   * 删除指定插件的一条文档或附件（供内部调用）
    */
   private async _deletePluginDoc(
     pluginName: string,
@@ -684,6 +697,9 @@ export class DatabaseAPI {
     }
   }
 
+  /**
+   * 清空指定插件的所有数据（供内部调用）
+   */
   private async _clearPluginData(
     pluginName: string
   ): Promise<{ success: boolean; deletedCount?: number; error?: string }> {
@@ -701,61 +717,40 @@ export class DatabaseAPI {
 
       let deletedCount = 0
 
-      // 1. 删除主数据库和元数据库的文档
+      // 1. 删除主数据库文档。清空插件数据是用户明确操作，删除 revision 需要收敛其他 leaf。
       for (const doc of allDocs) {
-        const result = lmdbInstance.remove(doc._id)
+        const result = lmdbInstance.removeAndResolve(doc._id)
         if (result.ok) {
           deletedCount++
         }
       }
 
-      // 2. 清理可能残留的元数据（主数据已删除但 meta 还在的情况）
-      const metaDb = lmdbInstance.getMetaDb()
-      const metaKeysToDelete: string[] = []
-      for (const { key } of metaDb.getRange({
-        start: prefix,
-        end: this.getNextPrefix(prefix)
-      })) {
-        if (key.startsWith(prefix)) {
-          metaKeysToDelete.push(key)
-        }
-      }
-
-      for (const key of metaKeysToDelete) {
-        metaDb.removeSync(key)
-      }
-
-      // 3. 删除附件数据库的附件和元数据
+      // 2. 物理清理本地附件 body；文档 tombstone 已承担同步删除语义。
       const attachmentDb = lmdbInstance.getAttachmentDb()
       const attachmentPrefix = `attachment:${prefix}`
-      const metadataPrefix = `attachment-ext:${prefix}`
-
-      const attachmentKeysToDelete: string[] = []
+      const attachmentDocIds: string[] = []
       for (const { key } of attachmentDb.getRange({
         start: attachmentPrefix,
         end: this.getNextPrefix(attachmentPrefix)
       })) {
         if (key.startsWith(attachmentPrefix)) {
-          attachmentKeysToDelete.push(key)
+          attachmentDocIds.push(key.slice('attachment:'.length))
         }
       }
-
-      const metadataKeysToDelete: string[] = []
-      for (const { key } of attachmentDb.getRange({
-        start: metadataPrefix,
-        end: this.getNextPrefix(metadataPrefix)
-      })) {
-        if (key.startsWith(metadataPrefix)) {
-          metadataKeysToDelete.push(key)
-        }
-      }
-
-      for (const key of attachmentKeysToDelete) {
-        attachmentDb.removeSync(key)
+      for (const docId of attachmentDocIds) {
+        lmdbInstance.removeAttachmentSilent(docId)
         deletedCount++
       }
-      for (const key of metadataKeysToDelete) {
-        attachmentDb.removeSync(key)
+
+      // 3. 清理插件专属文件系统数据目录（ztools.getPath('pluginData')），与「清除数据」语义保持一致。
+      // 失败不阻断清空，避免残留目录导致本次操作整体失败。
+      try {
+        await physicalFs.promises.rm(getPluginDataPath(pluginName), {
+          recursive: true,
+          force: true
+        })
+      } catch (error) {
+        console.error('[Database] 删除插件数据目录失败:', error)
       }
 
       return { success: true, deletedCount }
@@ -808,7 +803,7 @@ export class DatabaseAPI {
   }
 
   /**
-   * 公共方法：清空指定插件的所有数据
+   * 公共方法：清空指定插件的所有数据（LMDB 文档、附件与 ztools.getPath('pluginData') 数据目录）。
    */
   public async clearPluginData(
     pluginName: string

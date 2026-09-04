@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   DEFAULT_AVATAR,
   DEFAULT_PLACEHOLDER,
@@ -8,10 +9,18 @@ import {
   type AutoPasteOption,
   type MouseButtonType,
   type PrimaryColor,
-  type ThemeType
+  type TerminalType,
+  type ThemeType,
+  type WindowPositionStrategy
 } from '@/constants'
 import { Dropdown, HotkeyInput, Slider, useToast } from '@/components'
 import { applyCustomColor, applyPrimaryColor } from '@/utils'
+import {
+  DEFAULT_SEARCH_WALLPAPER_BLUR,
+  DEFAULT_SEARCH_WALLPAPER_OPACITY,
+  normalizeSearchWallpaperConfig,
+  type SearchWallpaperConfig
+} from '@shared/searchWallpaper'
 
 const { success, error, info, confirm } = useToast()
 
@@ -54,6 +63,13 @@ const autoBackToSearchOptions = [
   { label: '5分钟', value: '5m' },
   { label: '10分钟', value: '10m' },
   { label: '从不', value: 'never' }
+]
+
+const windowPositionStrategyOptions = [
+  { label: '记住上次位置', value: 'remember' },
+  { label: '鼠标屏居中', value: 'cursor' },
+  { label: '主屏居中', value: 'primary' },
+  { label: '上次活动屏居中', value: 'lastActive' }
 ]
 
 const recentRowsOptions = [
@@ -100,6 +116,38 @@ const superPanelMouseButtonOptions = [
 // 当前平台（与 window.ztools.getPlatform 返回类型保持一致）
 const platform = ref<'darwin' | 'win32' | 'linux'>('darwin')
 
+// 终端打开设置
+const terminal = ref<TerminalType>('default')
+const terminalCustomCommand = ref('')
+
+// 终端预设选项（按平台；仅 UI 标签，启动逻辑在主进程 terminalLauncher）
+const terminalOptions = computed(() => {
+  if (platform.value === 'win32') {
+    return [
+      { label: '系统默认', value: 'default' },
+      { label: 'Windows Terminal', value: 'wt' },
+      { label: 'PowerShell', value: 'powershell' },
+      { label: 'CMD', value: 'cmd' },
+      { label: '自定义', value: 'custom' }
+    ]
+  }
+  if (platform.value === 'linux') {
+    return [
+      { label: '系统默认', value: 'default' },
+      { label: 'GNOME Terminal', value: 'gnome-terminal' },
+      { label: 'Konsole', value: 'konsole' },
+      { label: 'XTerm', value: 'xterm' },
+      { label: '自定义', value: 'custom' }
+    ]
+  }
+  return [
+    { label: '系统默认 (Terminal)', value: 'default' },
+    { label: 'Ghostty', value: 'ghostty' },
+    { label: 'iTerm2', value: 'iterm2' },
+    { label: '自定义', value: 'custom' }
+  ]
+})
+
 // 默认快捷键（根据平台区分文案）
 const defaultHotkey = computed(() => {
   return platform.value === 'win32' ? 'Alt+Z' : 'Option+Z'
@@ -120,15 +168,18 @@ const hotkeyPresets = computed(() => {
 })
 
 const showHotkeyQuickActions = ref(false)
+const settingsLoaded = ref(false)
 
 // 本地状态（替代 windowStore）
 const theme = ref<ThemeType>('system')
-const primaryColor = ref<PrimaryColor>('blue')
+const primaryColor = ref<PrimaryColor>('green')
 const placeholder = ref(DEFAULT_PLACEHOLDER)
 const avatar = ref(DEFAULT_AVATAR)
 const autoPaste = ref<AutoPasteOption>('3s')
 const autoClear = ref<AutoClearOption>('immediately')
 const autoBackToSearch = ref<AutoBackToSearchOption>('never')
+const hideMainWindowOnPluginEsc = ref(false)
+const windowPositionStrategy = ref<WindowPositionStrategy>('remember')
 const showRecentInSearch = ref(true)
 const showMatchRecommendation = ref(true)
 const localAppSearch = ref(true)
@@ -136,6 +187,12 @@ const recentRows = ref(2)
 const pinnedRows = ref(2)
 const searchMode = ref<'aggregate' | 'list'>('aggregate')
 const clipboardRetentionDays = ref(180)
+
+const availableAutoBackToSearchOptions = computed(() =>
+  hideMainWindowOnPluginEsc.value
+    ? autoBackToSearchOptions.filter((option) => option.value === 'immediately')
+    : autoBackToSearchOptions
+)
 
 // Tab 键目标指令
 const tabTargetCommand = ref('')
@@ -153,13 +210,21 @@ const superPanelMouseButton = ref<MouseButtonType>('middle')
 const superPanelLongPressMs = ref(500)
 const superPanelBlockedApps = ref<Array<{ app: string; bundleId?: string; label?: string }>>([])
 
+const router = useRouter()
+
+// 跳转到提供商页面的翻译 tab（翻译能力已迁移）
+function goToTranslationProviders(): void {
+  router.push({ name: 'Providers', query: { tab: 'translation' } })
+}
+
 // 唤醒黑名单
 const wakeupBlacklist = ref<Array<{ app: string; bundleId?: string; label?: string }>>([])
 
-// 超级面板翻译设置
-const superPanelTranslateEnabled = ref(false)
-const translationStatus = ref<'idle' | 'downloading' | 'initializing' | 'ready' | 'error'>('idle')
+// 全屏模式下忽略热键
+const ignoreHotkeysOnFullscreen = ref(false)
 
+// 超级面板翻译设置（开关已迁移到「提供商 → 翻译」，这里仅保留字段以兼容历史持久化数据）
+const superPanelTranslateEnabled = ref(false)
 // 超级面板触发模式（计算属性）
 const superPanelTriggerMode = computed({
   get: () => {
@@ -199,6 +264,9 @@ const hotkey = ref('')
 // 不透明度设置
 const opacity = ref(1)
 
+// 主窗口紧凑顶部栏设置
+const compactMainWindowHeader = ref(false)
+
 // 插件默认高度设置
 const windowDefaultHeight = ref(541)
 
@@ -226,16 +294,21 @@ const customInternalApiPluginNames = ref<string[]>([])
 const proxyEnabled = ref(false)
 const proxyUrl = ref('')
 
-// 插件市场配置
-const pluginMarketCustom = ref(false)
-const pluginMarketUrl = ref('')
-
 // 窗口材质设置
 const windowMaterial = ref<'mica' | 'acrylic' | 'none'>('none')
 
 // 亚克力材质背景色透明度
 const acrylicLightOpacity = ref(78) // 明亮模式默认 78%
 const acrylicDarkOpacity = ref(50) // 暗黑模式默认 50%
+
+// 主搜索窗口壁纸保存宿主管理的本地副本，用户原始文件保持不变
+const searchWallpaper = ref<SearchWallpaperConfig | null>(null)
+const searchWallpaperPreviewFailed = ref(false)
+const searchWallpaperFileName = computed(() => {
+  const wallpaperPath = searchWallpaper.value?.path
+  if (!wallpaperPath) return ''
+  return wallpaperPath.split(/[\\/]/).pop() || wallpaperPath
+})
 
 // 颜色选择器引用
 const colorPickerInput = ref<HTMLInputElement | null>(null)
@@ -245,9 +318,9 @@ const autoCheckUpdate = ref(true)
 
 // 主题色选项
 const themeColors = [
+  { label: '翡翠绿', value: 'green', hex: '#059669' },
   { label: '天空蓝', value: 'blue', hex: '#0284c7' },
   { label: '罗兰紫', value: 'purple', hex: '#7c3aed' },
-  { label: '翡翠绿', value: 'green', hex: '#059669' },
   { label: '活力橙', value: 'orange', hex: '#ea580c' },
   { label: '宝石红', value: 'red', hex: '#dc2626' }
 ]
@@ -346,6 +419,25 @@ async function handleOpacityChange(): Promise<void> {
     await saveSettings()
   } catch (error) {
     console.error('设置窗口不透明度失败:', error)
+  }
+}
+
+/**
+ * 保存主窗口顶部栏密度，并立即同步到宿主运行时。
+ * @returns 设置保存和运行时更新完成后结束的 Promise。
+ */
+async function handleCompactMainWindowHeaderChange(): Promise<void> {
+  try {
+    // 先持久化用户选择，确保后续启动直接使用相同布局。
+    await saveSettings()
+    const result = await window.ztools.internal.setCompactMainWindowHeader(
+      compactMainWindowHeader.value
+    )
+    if (!result.success) {
+      throw new Error(result.error || '主窗口布局更新失败')
+    }
+  } catch (error) {
+    console.error('设置主窗口紧凑顶部栏失败:', error)
   }
 }
 
@@ -489,15 +581,55 @@ async function handleAutoClearChange(): Promise<void> {
   }
 }
 
-// 处理自动返回搜索配置变化
+/**
+ * 保存自动返回搜索配置；插件 ESC 直接隐藏启用时强制保持立即返回。
+ * @returns 设置保存和运行时更新完成后结束的 Promise。
+ */
 async function handleAutoBackToSearchChange(): Promise<void> {
   try {
+    // 直接隐藏依赖立即返回，防止下次呼出时仍停留在插件页面。
+    if (hideMainWindowOnPluginEsc.value) {
+      autoBackToSearch.value = 'immediately'
+    }
     await saveSettings()
     // 通知主渲染进程更新
     await window.ztools.internal.updateAutoBackToSearch(autoBackToSearch.value)
     console.log('自动返回搜索配置已更新:', autoBackToSearch.value)
   } catch (error) {
     console.error('保存自动返回搜索配置失败:', error)
+  }
+}
+
+/**
+ * 保存插件内 ESC 行为，并在启用时同步锁定立即返回搜索。
+ * @returns 设置保存和运行时更新完成后结束的 Promise。
+ */
+async function handleHideMainWindowOnPluginEscChange(): Promise<void> {
+  try {
+    // 先收敛关联配置，再一次性持久化，避免两个字段短暂不一致。
+    if (hideMainWindowOnPluginEsc.value) {
+      autoBackToSearch.value = 'immediately'
+    }
+    await saveSettings()
+    const result = await window.ztools.internal.updateHideMainWindowOnPluginEsc(
+      hideMainWindowOnPluginEsc.value
+    )
+    if (!result.success) {
+      throw new Error(result.error || '插件 ESC 行为更新失败')
+    }
+  } catch (error) {
+    console.error('保存插件 ESC 行为失败:', error)
+  }
+}
+
+// 处理窗口呼出位置策略变化
+async function handleWindowPositionStrategyChange(): Promise<void> {
+  try {
+    await saveSettings()
+    await window.ztools.internal.updateWindowPositionStrategy(windowPositionStrategy.value)
+    console.log('窗口呼出位置策略已更新:', windowPositionStrategy.value)
+  } catch (error) {
+    console.error('保存窗口呼出位置策略失败:', error)
   }
 }
 
@@ -684,40 +816,6 @@ async function handleSuperPanelEnabledChange(): Promise<void> {
   }
 }
 
-// 处理超级面板翻译开关变化
-async function handleSuperPanelTranslateChange(): Promise<void> {
-  try {
-    await saveSettings()
-    await window.ztools.internal.updateSuperPanelTranslate(superPanelTranslateEnabled.value)
-    if (superPanelTranslateEnabled.value) {
-      translationStatus.value = 'downloading'
-      // 轮询翻译状态
-      pollTranslationStatus()
-    } else {
-      translationStatus.value = 'idle'
-    }
-    console.log('超级面板翻译开关已更新:', superPanelTranslateEnabled.value)
-  } catch (err) {
-    console.error('更新超级面板翻译开关失败:', err)
-  }
-}
-
-// 轮询翻译引擎状态
-function pollTranslationStatus(): void {
-  const poll = async (): Promise<void> => {
-    try {
-      const result = await window.ztools.internal.getTranslationStatus()
-      translationStatus.value = result.status
-      if (result.status === 'downloading' || result.status === 'initializing') {
-        setTimeout(poll, 1000)
-      }
-    } catch {
-      // ignore
-    }
-  }
-  poll()
-}
-
 // 处理超级面板触发模式变化
 async function handleSuperPanelTriggerModeChange(mode: string | number): Promise<void> {
   try {
@@ -883,6 +981,16 @@ async function handleRemoveWakeupBlacklistApp(index: number): Promise<void> {
   }
 }
 
+// 全屏模式下忽略热键
+async function handleIgnoreHotkeysOnFullscreenChange(): Promise<void> {
+  try {
+    await saveSettings()
+    await window.ztools.internal.setIgnoreHotkeysOnFullscreen(ignoreHotkeysOnFullscreen.value)
+  } catch (err) {
+    console.error('更新全屏忽略热键设置失败:', err)
+  }
+}
+
 // 处理主题色变化
 async function handlePrimaryColorChange(color: string): Promise<void> {
   try {
@@ -1018,6 +1126,78 @@ async function handleAcrylicDarkOpacityChange(): Promise<void> {
   }
 }
 
+/**
+ * 保存壁纸配置并通知主搜索窗口立即更新。
+ * @returns 保存和通知完成后结束的 Promise
+ */
+async function persistSearchWallpaper(): Promise<void> {
+  // 先持久化设备本地配置，确保下次启动能够恢复。
+  await saveSettings()
+
+  // 跨 IPC 前转换为普通对象，避免 Vue Proxy 无法被 Electron 结构化克隆。
+  const wallpaperPayload = normalizeSearchWallpaperConfig(searchWallpaper.value)
+  await window.ztools.internal.updateSearchWallpaper(wallpaperPayload)
+}
+
+/**
+ * 打开本地图片选择器，并将选中的图片应用为主搜索窗口壁纸。
+ * @returns 选择、保存和通知完成后结束的 Promise
+ */
+async function handleSelectSearchWallpaper(): Promise<void> {
+  try {
+    const result = await window.ztools.internal.selectSearchWallpaper()
+    if (!result.success || !result.path || !result.url) {
+      if (result.error) error(`选择壁纸失败: ${result.error}`)
+      return
+    }
+
+    // 更换图片时保留用户已经调整的显示参数。
+    searchWallpaper.value = {
+      path: result.path,
+      url: result.url,
+      opacity: searchWallpaper.value?.opacity ?? DEFAULT_SEARCH_WALLPAPER_OPACITY,
+      blur: searchWallpaper.value?.blur ?? DEFAULT_SEARCH_WALLPAPER_BLUR
+    }
+    searchWallpaperPreviewFailed.value = false
+    await persistSearchWallpaper()
+    success('主搜索窗口壁纸已更新')
+  } catch (err) {
+    console.error('选择主搜索窗口壁纸失败:', err)
+    error('选择壁纸失败')
+  }
+}
+
+/**
+ * 保存透明度或模糊参数，并同步到主搜索窗口。
+ * @returns 保存和通知完成后结束的 Promise
+ */
+async function handleSearchWallpaperEffectChange(): Promise<void> {
+  try {
+    searchWallpaper.value = normalizeSearchWallpaperConfig(searchWallpaper.value)
+    await persistSearchWallpaper()
+  } catch (err) {
+    console.error('更新主搜索窗口壁纸效果失败:', err)
+    error('更新壁纸效果失败')
+  }
+}
+
+/**
+ * 清除壁纸配置，但不删除用户选择的原始图片。
+ * @returns 清除、保存和通知完成后结束的 Promise
+ */
+async function handleClearSearchWallpaper(): Promise<void> {
+  try {
+    // 只移除配置引用，避免对用户本地文件执行破坏性操作。
+    searchWallpaper.value = null
+    searchWallpaperPreviewFailed.value = false
+    await persistSearchWallpaper()
+    success('主搜索窗口壁纸已清除')
+  } catch (err) {
+    console.error('清除主搜索窗口壁纸失败:', err)
+    error('清除壁纸失败')
+  }
+}
+
 // 处理开机启动变化
 async function handleLaunchAtLoginChange(): Promise<void> {
   try {
@@ -1092,34 +1272,6 @@ async function handleProxyUrlChange(): Promise<void> {
   }
 }
 
-// 处理插件市场开关变化
-async function handlePluginMarketCustomChange(): Promise<void> {
-  try {
-    await saveSettings()
-    console.log('插件市场自定义开关已更新:', pluginMarketCustom.value)
-    info(pluginMarketCustom.value ? '自定义插件市场已启用' : '已恢复默认插件市场')
-  } catch (err) {
-    console.error('更新插件市场配置失败:', err)
-    pluginMarketCustom.value = !pluginMarketCustom.value
-  }
-}
-
-// 处理插件市场地址变化
-async function handlePluginMarketUrlChange(): Promise<void> {
-  try {
-    if (pluginMarketUrl.value && !pluginMarketUrl.value.startsWith('http')) {
-      error('市场地址必须以 http:// 或 https:// 开头')
-      return
-    }
-    await saveSettings()
-    console.log('插件市场地址已更新:', pluginMarketUrl.value)
-    info('插件市场地址已更新')
-  } catch (err: any) {
-    console.error('更新插件市场地址失败:', err)
-    error(`更新插件市场地址失败: ${err.message || '未知错误'}`)
-  }
-}
-
 async function handleAddCustomInternalApiPluginName(): Promise<void> {
   const pluginName = customInternalApiPluginNameInput.value.trim()
   if (!pluginName) {
@@ -1186,7 +1338,10 @@ async function getPlatformInfo(): Promise<void> {
 
 // ==================== 数据持久化 ====================
 
-// 加载设置
+/**
+ * 加载通用设置并应用当前页面负责的运行时状态。
+ * @returns 设置加载和应用完成后结束的 Promise
+ */
 async function loadSettings(): Promise<void> {
   try {
     // 加载数据库中的设置
@@ -1195,6 +1350,7 @@ async function loadSettings(): Promise<void> {
 
     if (data) {
       opacity.value = data.opacity ?? 1
+      compactMainWindowHeader.value = data.compactMainWindowHeader === true
       windowDefaultHeight.value = data.windowDefaultHeight ?? 541
       hotkey.value = data.hotkey ?? defaultHotkey.value
       showTrayIcon.value = data.showTrayIcon ?? true
@@ -1202,14 +1358,18 @@ async function loadSettings(): Promise<void> {
       avatar.value = data.avatar ?? DEFAULT_AVATAR
       autoPaste.value = data.autoPaste ?? '3s'
       autoClear.value = data.autoClear ?? 'immediately'
-      autoBackToSearch.value = data.autoBackToSearch ?? 'never'
+      hideMainWindowOnPluginEsc.value = data.hideMainWindowOnPluginEsc === true
+      autoBackToSearch.value = hideMainWindowOnPluginEsc.value
+        ? 'immediately'
+        : (data.autoBackToSearch ?? 'never')
+      windowPositionStrategy.value = data.windowPositionStrategy ?? 'remember'
       showRecentInSearch.value = data.showRecentInSearch ?? true
       showMatchRecommendation.value = data.showMatchRecommendation ?? true
       localAppSearch.value = data.localAppSearch ?? true
       recentRows.value = data.recentRows ?? 2
       pinnedRows.value = data.pinnedRows ?? 2
       theme.value = data.theme ?? 'system'
-      primaryColor.value = data.primaryColor ?? 'blue'
+      primaryColor.value = data.primaryColor ?? 'green'
       searchMode.value = data.searchMode ?? 'aggregate'
       autoCheckUpdate.value = data.autoCheckUpdate ?? true
       tabKeyFunction.value =
@@ -1227,14 +1387,13 @@ async function loadSettings(): Promise<void> {
       superPanelLongPressMs.value = data.superPanelLongPressMs ?? 500
       superPanelBlockedApps.value = data.superPanelBlockedApps ?? []
       wakeupBlacklist.value = data.wakeupBlacklist ?? []
+      ignoreHotkeysOnFullscreen.value = data.ignoreHotkeysOnFullscreen ?? false
       superPanelTranslateEnabled.value = data.superPanelTranslateEnabled ?? false
-      if (superPanelTranslateEnabled.value) {
-        pollTranslationStatus()
-      }
       // 窗口材质由主进程启动时保证一定有值，无需兜底
       windowMaterial.value = data.windowMaterial
       acrylicLightOpacity.value = data.acrylicLightOpacity ?? 78
       acrylicDarkOpacity.value = data.acrylicDarkOpacity ?? 50
+      searchWallpaper.value = normalizeSearchWallpaperConfig(data.searchWallpaper)
       // 开发者工具位置
       devToolsMode.value = data.devToolsMode ?? 'detach'
       // GPU 加速控制
@@ -1247,13 +1406,13 @@ async function loadSettings(): Promise<void> {
       proxyEnabled.value = data.proxyEnabled ?? false
       proxyUrl.value = data.proxyUrl ?? ''
 
-      // 插件市场配置
-      pluginMarketCustom.value = data.pluginMarketCustom ?? false
-      pluginMarketUrl.value = data.pluginMarketUrl ?? ''
-
       // 悬浮球配置
       floatingBallEnabled.value = data.floatingBallEnabled ?? false
       floatingBallLetter.value = data.floatingBallLetter || 'Z'
+
+      // 终端打开配置
+      terminal.value = data.terminal ?? 'default'
+      terminalCustomCommand.value = data.terminalCustomCommand ?? ''
 
       // 加载自定义颜色
       if (data.customColor) {
@@ -1277,7 +1436,10 @@ async function loadSettings(): Promise<void> {
   }
 }
 
-// 保存设置
+/**
+ * 合并保存通用设置，保留其他页面管理的字段。
+ * @returns 设置保存完成后结束的 Promise
+ */
 async function saveSettings(): Promise<void> {
   try {
     // 只有自定义头像才保存到数据库，默认头像不保存
@@ -1289,6 +1451,7 @@ async function saveSettings(): Promise<void> {
     await window.ztools.internal.dbPut('settings-general', {
       ...existing,
       opacity: opacity.value,
+      compactMainWindowHeader: compactMainWindowHeader.value,
       windowDefaultHeight: windowDefaultHeight.value,
       hotkey: hotkey.value,
       placeholder: placeholder.value,
@@ -1296,6 +1459,8 @@ async function saveSettings(): Promise<void> {
       autoPaste: autoPaste.value,
       autoClear: autoClear.value,
       autoBackToSearch: autoBackToSearch.value,
+      hideMainWindowOnPluginEsc: hideMainWindowOnPluginEsc.value,
+      windowPositionStrategy: windowPositionStrategy.value,
       showRecentInSearch: showRecentInSearch.value,
       showMatchRecommendation: showMatchRecommendation.value,
       localAppSearch: localAppSearch.value,
@@ -1313,6 +1478,7 @@ async function saveSettings(): Promise<void> {
       superPanelLongPressMs: superPanelLongPressMs.value,
       superPanelBlockedApps: superPanelBlockedApps.value.map((item) => ({ ...item })),
       wakeupBlacklist: wakeupBlacklist.value.map((item) => ({ ...item })),
+      ignoreHotkeysOnFullscreen: ignoreHotkeysOnFullscreen.value,
       superPanelTranslateEnabled: superPanelTranslateEnabled.value,
       theme: theme.value,
       primaryColor: primaryColor.value,
@@ -1321,26 +1487,37 @@ async function saveSettings(): Promise<void> {
       windowMaterial: windowMaterial.value,
       acrylicLightOpacity: acrylicLightOpacity.value,
       acrylicDarkOpacity: acrylicDarkOpacity.value,
+      // 数据库 IPC 同样只接收可结构化克隆的普通壁纸对象。
+      searchWallpaper: normalizeSearchWallpaperConfig(searchWallpaper.value),
       devToolsMode: devToolsMode.value,
       disableGpuAcceleration: disableGpuAcceleration.value,
       customInternalApiPluginNames: [...customInternalApiPluginNames.value],
       proxyEnabled: proxyEnabled.value,
       proxyUrl: proxyUrl.value,
-      pluginMarketCustom: pluginMarketCustom.value,
-      pluginMarketUrl: pluginMarketUrl.value,
       autoCheckUpdate: autoCheckUpdate.value,
-      clipboardRetentionDays: clipboardRetentionDays.value
+      clipboardRetentionDays: clipboardRetentionDays.value,
+      terminal: terminal.value,
+      terminalCustomCommand: terminalCustomCommand.value
     })
   } catch (error) {
     console.error('保存设置失败:', error)
   }
 }
 
+async function initializeSettings(): Promise<void> {
+  try {
+    // 平台会影响快捷键默认值和平台专属选项，需在设置表单展示前确定。
+    await getPlatformInfo()
+    await loadSettings()
+  } finally {
+    settingsLoaded.value = true
+  }
+}
+
 // 初始化时加载设置
 onMounted(() => {
-  loadSettings()
-  getPlatformInfo()
   document.addEventListener('click', handleQuickActionsClickOutside)
+  void initializeSettings()
 })
 
 onUnmounted(() => {
@@ -1349,7 +1526,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="content-panel">
+  <div v-if="settingsLoaded" class="content-panel">
     <!-- ==================== 基础 ==================== -->
     <div class="setting-group">
       <h3 class="setting-group-title">基础</h3>
@@ -1451,6 +1628,24 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
+
+      <div class="setting-item">
+        <div class="setting-label">
+          <span>全屏模式下忽略热键</span>
+          <span class="setting-desc">当全屏应用激活时禁用快捷键（建议游戏时打开）</span>
+        </div>
+        <div class="setting-control">
+          <label class="toggle">
+            <input
+              v-model="ignoreHotkeysOnFullscreen"
+              type="checkbox"
+              aria-label="全屏模式下忽略热键"
+              @change="handleIgnoreHotkeysOnFullscreenChange"
+            />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
     </div>
 
     <!-- ==================== 外观 ==================== -->
@@ -1464,6 +1659,24 @@ onUnmounted(() => {
         </div>
         <div class="setting-control">
           <Dropdown v-model="theme" :options="themeOptions" @change="handleThemeChange" />
+        </div>
+      </div>
+
+      <div class="setting-item">
+        <div class="setting-label">
+          <span>紧凑顶部栏</span>
+          <span class="setting-desc">缩小主搜索框和插件顶部栏，显示更多内容</span>
+        </div>
+        <div class="setting-control">
+          <label class="toggle">
+            <input
+              v-model="compactMainWindowHeader"
+              type="checkbox"
+              aria-label="紧凑顶部栏"
+              @change="handleCompactMainWindowHeaderChange"
+            />
+            <span class="toggle-slider"></span>
+          </label>
         </div>
       </div>
 
@@ -1563,6 +1776,108 @@ onUnmounted(() => {
             :step="1"
             :formatter="(value) => `${value}%`"
             @change="handleAcrylicDarkOpacityChange"
+          />
+        </div>
+      </div>
+
+      <div class="setting-item wallpaper-setting-item">
+        <div class="setting-label">
+          <span>主搜索窗口壁纸</span>
+          <span class="setting-desc">图片副本保存在 .ztools/avatar，超宽图片会自动压缩</span>
+        </div>
+        <div class="setting-control wallpaper-control">
+          <div v-if="searchWallpaper" class="wallpaper-preview-wrapper">
+            <img
+              v-if="!searchWallpaperPreviewFailed"
+              :src="searchWallpaper.url"
+              class="wallpaper-preview"
+              alt="主搜索窗口壁纸预览"
+              draggable="false"
+              @load="searchWallpaperPreviewFailed = false"
+              @error="searchWallpaperPreviewFailed = true"
+            />
+            <div v-else class="wallpaper-preview wallpaper-preview-error">图片不可用</div>
+          </div>
+          <div class="wallpaper-actions">
+            <span v-if="searchWallpaper" class="wallpaper-file-name" :title="searchWallpaper.path">
+              {{ searchWallpaperFileName }}
+            </span>
+            <div class="wallpaper-buttons">
+              <button class="btn" @click="handleSelectSearchWallpaper">
+                {{ searchWallpaper ? '更换图片' : '选择图片' }}
+              </button>
+              <button v-if="searchWallpaper" class="btn" @click="handleClearSearchWallpaper">
+                清除
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="searchWallpaper" class="setting-item">
+        <div class="setting-label">
+          <span>壁纸透明度</span>
+          <span class="setting-desc">只调整壁纸图片层，不影响窗口和文字透明度</span>
+        </div>
+        <div class="setting-control opacity-control">
+          <Slider
+            v-model="searchWallpaper.opacity"
+            :min="0.05"
+            :max="1"
+            :step="0.05"
+            :formatter="(value) => `${Math.round(value * 100)}%`"
+            @change="handleSearchWallpaperEffectChange"
+          />
+        </div>
+      </div>
+
+      <div v-if="searchWallpaper" class="setting-item">
+        <div class="setting-label">
+          <span>壁纸模糊</span>
+          <span class="setting-desc">模糊仅作用于壁纸图片，范围 0 至 20 像素</span>
+        </div>
+        <div class="setting-control opacity-control">
+          <Slider
+            v-model="searchWallpaper.blur"
+            :min="0"
+            :max="20"
+            :step="1"
+            :formatter="(value) => `${value}px`"
+            @change="handleSearchWallpaperEffectChange"
+          />
+        </div>
+      </div>
+    </div>
+
+    <!-- ==================== 终端打开 ==================== -->
+    <div class="setting-group">
+      <h3 class="setting-group-title">终端打开</h3>
+
+      <div class="setting-item">
+        <div class="setting-label">
+          <span>打开终端应用</span>
+          <span class="setting-desc">从 Finder 唤出「在终端打开」时使用的终端</span>
+        </div>
+        <div class="setting-control">
+          <Dropdown v-model="terminal" :options="terminalOptions" @change="saveSettings" />
+        </div>
+      </div>
+
+      <div v-if="terminal === 'custom'" class="setting-item">
+        <div class="setting-label">
+          <span>自定义命令</span>
+          <span class="setting-desc"
+            >用 {path} 代表目标目录，如 ghostty --working-directory={path}</span
+          >
+        </div>
+        <div class="setting-control">
+          <input
+            v-model="terminalCustomCommand"
+            type="text"
+            class="input"
+            placeholder="alacritty --working-directory={path}"
+            @blur="saveSettings"
+            @keyup.enter="saveSettings"
           />
         </div>
       </div>
@@ -1860,14 +2175,46 @@ onUnmounted(() => {
 
       <div class="setting-item">
         <div class="setting-label">
+          <span>插件内 ESC 直接隐藏</span>
+          <span class="setting-desc">在插件中按 ESC 直接隐藏主窗口，下次呼出时显示搜索</span>
+        </div>
+        <div class="setting-control">
+          <label class="toggle">
+            <input
+              v-model="hideMainWindowOnPluginEsc"
+              type="checkbox"
+              aria-label="插件内 ESC 直接隐藏"
+              @change="handleHideMainWindowOnPluginEscChange"
+            />
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="setting-item">
+        <div class="setting-label">
           <span>自动返回到搜索</span>
           <span class="setting-desc">主窗口打开插件后隐藏，在设定时间后自动返回搜索界面</span>
         </div>
         <div class="setting-control">
           <Dropdown
             v-model="autoBackToSearch"
-            :options="autoBackToSearchOptions"
+            :options="availableAutoBackToSearchOptions"
             @change="handleAutoBackToSearchChange"
+          />
+        </div>
+      </div>
+
+      <div class="setting-item">
+        <div class="setting-label">
+          <span>窗口呼出位置</span>
+          <span class="setting-desc">每次呼出主窗口时的定位策略</span>
+        </div>
+        <div class="setting-control">
+          <Dropdown
+            v-model="windowPositionStrategy"
+            :options="windowPositionStrategyOptions"
+            @change="handleWindowPositionStrategyChange"
           />
         </div>
       </div>
@@ -2010,49 +2357,13 @@ onUnmounted(() => {
 
       <div v-if="superPanelEnabled" class="setting-item">
         <div class="setting-label">
-          <span>选中翻译</span>
-          <span class="setting-desc">
-            选中文字触发超级面板时，自动翻译为中文显示（使用 Bergamot 离线翻译引擎，首次启用需下载约
-            55MB 模型）
-          </span>
-          <span
-            v-if="superPanelTranslateEnabled && translationStatus === 'downloading'"
-            class="setting-desc"
-            style="color: var(--primary-color)"
+          <span>翻译</span>
+          <span class="setting-desc"
+            >翻译能力已迁移至「提供商 → 翻译」，点击前往管理翻译引擎与提供商</span
           >
-            正在下载翻译模型...
-          </span>
-          <span
-            v-else-if="superPanelTranslateEnabled && translationStatus === 'initializing'"
-            class="setting-desc"
-            style="color: var(--primary-color)"
-          >
-            正在初始化翻译引擎...
-          </span>
-          <span
-            v-else-if="superPanelTranslateEnabled && translationStatus === 'ready'"
-            class="setting-desc"
-            style="color: var(--success-color)"
-          >
-            翻译引擎就绪
-          </span>
-          <span
-            v-else-if="superPanelTranslateEnabled && translationStatus === 'error'"
-            class="setting-desc"
-            style="color: var(--danger-color)"
-          >
-            翻译引擎初始化失败
-          </span>
         </div>
         <div class="setting-control">
-          <label class="toggle">
-            <input
-              v-model="superPanelTranslateEnabled"
-              type="checkbox"
-              @change="handleSuperPanelTranslateChange"
-            />
-            <span class="toggle-slider"></span>
-          </label>
+          <button class="btn" @click="goToTranslationProviders">前往翻译</button>
         </div>
       </div>
 
@@ -2202,40 +2513,6 @@ onUnmounted(() => {
           />
         </div>
       </div>
-
-      <div class="setting-item">
-        <div class="setting-label">
-          <span>自定义插件市场</span>
-          <span class="setting-desc">配置自定义插件市场地址</span>
-        </div>
-        <div class="setting-control">
-          <label class="toggle">
-            <input
-              v-model="pluginMarketCustom"
-              type="checkbox"
-              @change="handlePluginMarketCustomChange"
-            />
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
-
-      <div v-if="pluginMarketCustom" class="setting-item">
-        <div class="setting-label">
-          <span>市场地址</span>
-          <span class="setting-desc">自定义插件市场的基础 URL</span>
-        </div>
-        <div class="setting-control">
-          <input
-            v-model="pluginMarketUrl"
-            type="text"
-            class="input"
-            placeholder="例如: https://market.example.com"
-            @blur="handlePluginMarketUrlChange"
-            @keyup.enter="handlePluginMarketUrlChange"
-          />
-        </div>
-      </div>
     </div>
 
     <!-- ==================== 开发者 ==================== -->
@@ -2319,6 +2596,7 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+  <div v-else class="content-panel" aria-busy="true"></div>
 </template>
 
 <style scoped>
@@ -2487,6 +2765,66 @@ onUnmounted(() => {
 .opacity-control {
   min-width: 250px;
   gap: 12px;
+}
+
+.wallpaper-setting-item {
+  align-items: flex-start;
+}
+
+.wallpaper-control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  min-width: 360px;
+}
+
+.wallpaper-preview-wrapper {
+  width: 96px;
+  height: 60px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  background: var(--control-bg);
+}
+
+.wallpaper-preview {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.wallpaper-preview-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  text-align: center;
+}
+
+.wallpaper-actions {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.wallpaper-file-name {
+  max-width: 230px;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wallpaper-buttons {
+  display: flex;
+  gap: 8px;
 }
 
 /* 文本输入框 - 只设置布局，颜色由 global.css 控制 */

@@ -31,7 +31,7 @@ function normalizeModifier(modifier: string): string {
  */
 class DoubleTapManager {
   private handlers: DoubleTapHandler[] = []
-  private lastModifierUp: { modifier: string; time: number } | null = null
+  private lastTap: { keycode: number; time: number } | null = null
   private nonModifierPressed = false
   private started = false
   private listenersRegistered = false
@@ -40,11 +40,11 @@ class DoubleTapManager {
   private modifierKeysReleasedWaiters = new Set<(released: boolean) => void>()
   private keepAliveCount = 0
 
-  // 双击最大间隔（毫秒）
   private readonly DOUBLE_TAP_INTERVAL = 400
-  // 单次按键最大持续时间（超过则视为长按，非 tap）
   private readonly MAX_TAP_DURATION = 300
-  private modifierDownTime = 0
+  private readonly MIN_TAP_DURATION = 10
+  private readonly MIN_TAP_GAP = 50
+  private downTimeByKeycode = new Map<number, number>()
 
   /**
    * 注册双击修饰键回调
@@ -102,7 +102,7 @@ class DoubleTapManager {
         resolve()
       }, timeoutMs)
 
-      const wrappedResolve = () => {
+      const wrappedResolve = (): void => {
         if (timer) {
           clearTimeout(timer)
           timer = null
@@ -129,7 +129,7 @@ class DoubleTapManager {
         resolve(false)
       }, timeoutMs)
 
-      const wrappedResolve = (released: boolean) => {
+      const wrappedResolve = (released: boolean): void => {
         if (timer) {
           clearTimeout(timer)
           timer = null
@@ -168,9 +168,9 @@ class DoubleTapManager {
     console.log('[DoubleTapManager] 全局键盘监听已停止')
     this.started = false
     this.listenersRegistered = false
-    this.lastModifierUp = null
+    this.lastTap = null
     this.nonModifierPressed = false
-    this.modifierDownTime = 0
+    this.downTimeByKeycode.clear()
     this.pressedKeycodes.clear()
     this.resolveAllKeysReleasedWaiters()
     this.resolveModifierKeysReleasedWaiters(false)
@@ -189,13 +189,19 @@ class DoubleTapManager {
 
     const modifier = MODIFIER_KEYCODES[e.keycode]
     if (modifier) {
-      if (this.modifierDownTime === 0) {
-        this.modifierDownTime = Date.now()
+      if (!this.downTimeByKeycode.has(e.keycode)) {
+        this.downTimeByKeycode.set(e.keycode, Date.now())
+      }
+      // 修饰键按下且无其他修饰键在按时，重置组合键标记
+      const otherModifierHeld = [...this.pressedKeycodes].some(
+        (k) => k !== e.keycode && MODIFIER_KEYCODES[k]
+      )
+      if (!otherModifierHeld) {
+        this.nonModifierPressed = false
       }
     } else {
-      // 非修饰键被按下，重置双击检测状态
       this.nonModifierPressed = true
-      this.lastModifierUp = null
+      this.lastTap = null
     }
   }
 
@@ -215,41 +221,47 @@ class DoubleTapManager {
 
     const modifier = MODIFIER_KEYCODES[e.keycode]
     if (!modifier) {
-      this.nonModifierPressed = false
-      this.modifierDownTime = 0
       return
     }
 
     const now = Date.now()
+    const downTime = this.downTimeByKeycode.get(e.keycode)
+    this.downTimeByKeycode.delete(e.keycode)
 
-    // 如果按键时间过长（长按），不算作 tap
-    if (this.modifierDownTime > 0 && now - this.modifierDownTime > this.MAX_TAP_DURATION) {
-      this.modifierDownTime = 0
-      this.lastModifierUp = null
+    // 无对应 keydown（RDP 注入的裸 keyup）→ 丢弃并重置序列
+    if (downTime === undefined) {
+      this.lastTap = null
       return
     }
-    this.modifierDownTime = 0
 
-    // 如果期间有非修饰键按下，不算 tap
+    const hold = now - downTime
+
+    // 按住时间过短（注入的 down+up 对）或过长（长按），不算 tap
+    if (hold < this.MIN_TAP_DURATION || hold > this.MAX_TAP_DURATION) {
+      this.lastTap = null
+      return
+    }
+
+    // 期间有非修饰键按下，消费标记后不算 tap
     if (this.nonModifierPressed) {
       this.nonModifierPressed = false
-      this.lastModifierUp = null
+      this.lastTap = null
       return
     }
 
-    // 检查是否为双击
+    // 双击：同一物理键、间隔在合法范围内
     if (
-      this.lastModifierUp &&
-      this.lastModifierUp.modifier === modifier &&
-      now - this.lastModifierUp.time < this.DOUBLE_TAP_INTERVAL
+      this.lastTap &&
+      this.lastTap.keycode === e.keycode &&
+      now - this.lastTap.time >= this.MIN_TAP_GAP &&
+      now - this.lastTap.time < this.DOUBLE_TAP_INTERVAL
     ) {
-      this.lastModifierUp = null
+      this.lastTap = null
       this.fireHandlers(modifier)
       return
     }
 
-    // 记录为第一次 tap
-    this.lastModifierUp = { modifier, time: now }
+    this.lastTap = { keycode: e.keycode, time: now }
   }
 
   /**

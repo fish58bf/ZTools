@@ -1,4 +1,4 @@
-import { exec, spawn } from 'child_process'
+import { exec } from 'child_process'
 import os from 'os'
 import type { PluginManager } from '../../managers/pluginManager'
 import { BrowserWindow, clipboard, nativeImage, Notification, shell } from 'electron'
@@ -7,6 +7,7 @@ import { GLOBAL_SCROLLBAR_CSS } from '../../core/globalStyles'
 import { screenCapture } from '../../core/screenCapture'
 import windowManager from '../../managers/windowManager'
 import databaseAPI from '../shared/database'
+import * as terminalLauncher from '../../utils/terminalLauncher'
 import { ColorPicker } from '../../core/native/index.js'
 import { getExplorerFolderPathFromWindow } from '../../utils/common'
 
@@ -37,54 +38,6 @@ interface WindowsWindowInfo {
  */
 export function getWindowsExplorerPath(windowInfo: WindowsWindowInfo): string | null {
   return getExplorerFolderPathFromWindow(windowInfo, 'SystemCmd')
-}
-
-/**
- * 尝试启动终端（Windows 平台）
- * 回退优先级：Windows Terminal -> PowerShell -> CMD
- */
-/**
- * 安全转义 PowerShell 路径参数
- * 使用单引号包裹，将路径中的单引号替换为两个单引号
- */
-function escapePowerShellPath(folderPath: string): string {
-  const escaped = folderPath.replace(/'/g, "''")
-  return `'${escaped}'`
-}
-
-/**
- * 安全转义 CMD 路径参数
- * 使用双引号包裹，将路径中的双引号转义
- */
-function escapeCmdPath(folderPath: string): string {
-  // CMD 中双引号内的双引号需要用 ^ 转义
-  const escaped = folderPath.replace(/"/g, '^"')
-  return `"${escaped}"`
-}
-
-export async function tryLaunchWindowsTerminal(folderPath: string): Promise<boolean> {
-  const tryLaunch = (cmd: string, args: string[]): Promise<boolean> => {
-    return new Promise<boolean>((resolve) => {
-      const child = spawn(cmd, args, { detached: true, stdio: 'ignore' })
-      child.on('error', () => resolve(false))
-      if (child.pid) {
-        child.unref()
-        resolve(true)
-      }
-    })
-  }
-
-  // Windows Terminal 使用 spawn 参数数组，天然安全
-  // PowerShell 和 CMD 需要转义路径以防止命令注入
-  return (
-    (await tryLaunch('wt.exe', ['-d', folderPath])) ||
-    (await tryLaunch('powershell.exe', [
-      '-NoExit',
-      '-Command',
-      `Set-Location -Path ${escapePowerShellPath(folderPath)}`
-    ])) ||
-    (await tryLaunch('cmd.exe', ['/K', `cd /d ${escapeCmdPath(folderPath)}`]))
-  )
 }
 
 /**
@@ -267,15 +220,23 @@ async function handleTemplateSearch(
   return { success: false, error: '缺少搜索关键词' }
 }
 
+/**
+ * 执行截图：autoConfirm=false 进入编辑态由用户标注后再出图；
+ * 仍保留写入剪贴板 + 通知的行为，并在返回值中携带 image/bounds 供工具调用链消费。
+ * @param ctx 系统指令上下文
+ * @returns 截图结果，包含 dataURL 与区域信息
+ */
 async function handleScreenshot(ctx: SystemCommandContext): Promise<any> {
-  console.log('[SystemCmd] 执行截图')
+  console.log('[SystemCmd] 执行截图（编辑态）')
 
   try {
-    const result = await screenCapture(ctx.mainWindow || undefined, false)
+    // autoConfirm=false：选区确定后进入编辑态，由用户标注/确认后再出图
+    const result = await screenCapture(ctx.mainWindow || undefined, false, { autoConfirm: false })
     if (!result.image) {
       return { success: false, error: '未获取到截图内容' }
     }
 
+    // 保留旧行为：写入剪贴板并通知用户
     clipboard.writeImage(nativeImage.createFromDataURL(result.image))
 
     new Notification({
@@ -283,7 +244,8 @@ async function handleScreenshot(ctx: SystemCommandContext): Promise<any> {
       body: '截图已复制到剪贴板'
     }).show()
 
-    return { success: true }
+    // 附带 image/bounds，供后续工具调用链使用
+    return { success: true, image: result.image, bounds: result.bounds }
   } catch (error) {
     console.error('[SystemCmd] 截图失败:', error)
     return { success: false, error: String(error) }
@@ -492,50 +454,6 @@ async function handleCopyPath(
 }
 
 /**
- * 在 macOS 上打开终端并切换到指定目录
- */
-async function openTerminalOnMac(
-  folderPath: string,
-  execAsync: (cmd: string) => Promise<{ stdout: string; stderr: string }>
-): Promise<void> {
-  const script = `
-    tell application "Terminal"
-      activate
-      do script "cd " & quoted form of "${folderPath}"
-    end tell
-  `
-  await execAsync(`osascript -e '${script}'`)
-}
-
-/**
- * 在 Linux 上尝试启动终端并切换到指定目录
- * 回退优先级：exo-open -> gnome-terminal -> xterm
- */
-async function openTerminalOnLinux(folderPath: string): Promise<boolean> {
-  const tryLaunch = (cmd: string, args: string[]): Promise<boolean> => {
-    return new Promise<boolean>((resolve) => {
-      const child = spawn(cmd, args, { detached: true, stdio: 'ignore' })
-      child.on('error', () => resolve(false))
-      if (child.pid) {
-        child.unref()
-        resolve(true)
-      }
-    })
-  }
-
-  return (
-    (await tryLaunch('exo-open', [
-      '--launch',
-      'TerminalEmulator',
-      '--working-directory',
-      folderPath
-    ])) ||
-    (await tryLaunch('gnome-terminal', [`--working-directory=${folderPath}`])) ||
-    (await tryLaunch('xterm', ['-cd', folderPath]))
-  )
-}
-
-/**
  * 从窗口信息获取 macOS 访达当前目录路径
  */
 async function getMacFinderPath(
@@ -593,21 +511,10 @@ async function handleOpenTerminal(
       return { success: false, error: '无法确定目标路径' }
     }
 
-    // 根据平台打开终端
-    if (process.platform === 'darwin') {
-      await openTerminalOnMac(targetPath, execAsync)
-    } else if (process.platform === 'linux') {
-      const launched = await openTerminalOnLinux(targetPath)
-      if (!launched) {
-        throw new Error('Could not find a supported terminal emulator')
-      }
-    } else if (process.platform === 'win32') {
-      const launched = await tryLaunchWindowsTerminal(targetPath)
-      if (!launched) {
-        return { success: false, error: '无法启动终端' }
-      }
-    } else {
-      return { success: false, error: `不支持的平台: ${process.platform}` }
+    // 打开终端（统一走 terminalLauncher，按用户配置分发）
+    const launched = await terminalLauncher.openInTerminal(targetPath)
+    if (!launched) {
+      return { success: false, error: '无法启动终端' }
     }
 
     console.log('[SystemCmd] 已在终端打开:', targetPath)

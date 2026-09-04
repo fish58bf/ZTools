@@ -9,23 +9,28 @@ import {
   screen,
   Tray
 } from 'electron'
-import path from 'path'
+import { getPreloadPath, getRendererPath } from '../utils/appBundlePath'
 // import trayIconLight from '../../../resources/icons/trayTemplate@2x-light.png?asset'
 import trayIcon from '../../../resources/icons/trayTemplate@2x.png?asset'
 import windowsIcon from '../../../resources/icons/windows-icon.png?asset'
 
 import api from '../api'
 import databaseAPI from '../api/shared/database'
+import dndManager from '../core/dndManager.js'
 import doubleTapManager from '../core/doubleTapManager.js'
 import globalInputManager from '../core/globalInputManager.js'
 import { WindowManager as NativeWindowManager } from '../core/native/index.js'
 import clipboardManager from './clipboardManager'
 
-import { WINDOW_DEFAULT_HEIGHT, WINDOW_INITIAL_HEIGHT, WINDOW_WIDTH } from '../common/constants'
+import { WINDOW_DEFAULT_HEIGHT, WINDOW_WIDTH } from '../common/constants'
 import detachedWindowManager from '../core/detachedWindowManager'
 import superPanelManager from '../core/superPanelManager'
 import { applyWindowMaterial, getDefaultWindowMaterial } from '../utils/windowUtils'
 import pluginManager from './pluginManager'
+import {
+  normalizeCompactMainWindowHeader,
+  resolveMainWindowHeaderHeight
+} from '../../shared/mainWindowLayout'
 
 // 窗口材质类型
 type WindowMaterial = 'mica' | 'acrylic' | 'none'
@@ -90,6 +95,7 @@ class WindowManager {
   private windowPositionsByDisplay: Record<number, { x: number; y: number }> = {}
   private autoBackToSearchTimer: NodeJS.Timeout | null = null // 自动返回搜索定时器
   private autoBackToSearchConfig: string = 'never' // 自动返回搜索配置
+  private windowPositionStrategy: string = 'remember' // 窗口呼出位置策略
   private lastFocusTarget: 'mainWindow' | 'plugin' | null = null // 窗口隐藏前的焦点状态
   private isRestoringFocus: boolean = false // 是否正在恢复焦点状态（防止 focus 事件监听器干扰）
   private suppressBlurHide: boolean = false // 临时抑制 blur 事件隐藏窗口（文件关联打开等场景）
@@ -102,7 +108,8 @@ class WindowManager {
   // Double-tap 唤醒窗口时，Windows 可能紧跟一个短暂 blur；这两个 timer 用于跳过误关闭并补一次焦点。
   private doubleTapFocusTimer: ReturnType<typeof setTimeout> | null = null
   private windowsHotkeyFocusTimer: ReturnType<typeof setTimeout> | null = null
-  private doubleTapSuppressBlurTimer: ReturnType<typeof setTimeout> | null = null
+  private transientBlurSuppressTimer: ReturnType<typeof setTimeout> | null = null
+  private transientBlurSuppressUntil: number = 0 // 瞬时 blur 抑制截止时间戳，取最长值避免提前释放
   // 全局左键状态用于区分“点击外部关闭”和“从外部拖文件进窗口”。拖拽时 blur 先挂起，等 mouseup 再判断。
   private leftMouseDown: boolean = false // 全局左键是否按下，用于拖拽时延迟 blur 隐藏
   private pendingBlurHideOnMouseUp: boolean = false // blur 时左键按下，等待 mouseup 再决定是否隐藏
@@ -111,6 +118,7 @@ class WindowManager {
   private appShortcuts: Map<string, string> = new Map() // 应用快捷键映射表 (快捷键 -> 目标指令)
   private wakeupBlacklist: Array<{ app: string; bundleId?: string; label?: string }> = [] // 唤醒黑名单
   private onThemeInfoChanged: (() => void) | null = null // 主题信息变更回调钩子
+  private compactMainWindowHeader = false // 主窗口是否使用紧凑顶部栏
   // 应用快捷键触发时携带的当前输入上下文
   private appShortcutLaunchContext: AppShortcutLaunchContext = {
     searchQuery: '',
@@ -132,6 +140,23 @@ class WindowManager {
    */
   public notifyBackToSearch(): void {
     this.mainWindow?.webContents.send('back-to-search')
+  }
+
+  /**
+   * 更新主窗口顶部栏密度，后续窗口尺寸和插件视图布局统一读取该状态。
+   * @param enabled 是否启用紧凑顶部栏。
+   * @returns 无返回值。
+   */
+  public setCompactMainWindowHeader(enabled: boolean): void {
+    this.compactMainWindowHeader = normalizeCompactMainWindowHeader(enabled)
+  }
+
+  /**
+   * 获取当前主窗口顶部栏高度。
+   * @returns 当前主窗口顶部栏高度，单位为像素。
+   */
+  public getMainWindowHeaderHeight(): number {
+    return resolveMainWindowHeaderHeight(this.compactMainWindowHeader)
   }
 
   private isLeftMouseButton(button: unknown): boolean {
@@ -157,8 +182,40 @@ class WindowManager {
     }
   }
 
+  /**
+   * 判断当前是否应阻止失焦自动隐藏，E2E 模式始终保持窗口可见。
+   *
+   * @returns 需要阻止失焦隐藏时返回 true。
+   */
   private isBlurHideSuppressed(): boolean {
-    return this.suppressBlurHide || this.modalDialogBlurHideSuppressed
+    return (
+      process.env.ZTOOLS_E2E === '1' ||
+      this.suppressBlurHide ||
+      this.modalDialogBlurHideSuppressed ||
+      this.transientBlurSuppressTimer !== null
+    )
+  }
+
+  /**
+   * 短暂抑制 blur 自动隐藏窗口。
+   *
+   * 窗口激活/呼出瞬间（尤其在其它应用处于全屏时抢焦点）系统可能补发一次瞬时 blur，
+   * 若不抑制会立刻触发 hideWindow 造成"一闪而过"。多次调用取最长的抑制时长，
+   * 避免后一次较短抑制把先前更长的抑制提前释放（例如双击唤醒与普通呼出叠加）。
+   */
+  private suppressBlurHideTransiently(durationMs: number): void {
+    const until = Date.now() + durationMs
+    if (this.transientBlurSuppressTimer && this.transientBlurSuppressUntil >= until) {
+      return
+    }
+    if (this.transientBlurSuppressTimer) {
+      clearTimeout(this.transientBlurSuppressTimer)
+    }
+    this.transientBlurSuppressUntil = until
+    this.transientBlurSuppressTimer = setTimeout(() => {
+      this.transientBlurSuppressTimer = null
+      this.transientBlurSuppressUntil = 0
+    }, durationMs)
   }
 
   private beginModalDialogBlurHideSuppression(): void {
@@ -292,17 +349,24 @@ class WindowManager {
 
   /**
    * 创建主窗口
+   *
+   * @returns 创建完成的主窗口实例。
    */
   public createWindow(): BrowserWindow {
     // 智能检测：在鼠标所在的显示器上打开窗口
     const { width, height, x: displayX, y: displayY } = this.getDisplayAtCursor()
+
+    // 创建窗口前读取布局偏好，避免首次显示后再跳变高度。
+    const settings = databaseAPI.dbGet('settings-general')
+    this.setCompactMainWindowHeader(settings?.compactMainWindowHeader === true)
+    const initialHeight = this.getMainWindowHeaderHeight()
 
     // 根据平台设置不同的窗口配置
     const windowConfig: Electron.BrowserWindowConstructorOptions = {
       type: 'panel',
       title: 'ZTools',
       width: WINDOW_WIDTH,
-      height: WINDOW_INITIAL_HEIGHT,
+      height: initialHeight,
       alwaysOnTop: true,
       // 基于最大窗口高度计算居中位置，确保窗口扩展时不会超出屏幕
       x: displayX + Math.floor((width - WINDOW_WIDTH) / 2),
@@ -314,7 +378,7 @@ class WindowManager {
       show: false,
       hasShadow: true, // 启用窗口阴影（可调整为 false 来移除阴影）
       webPreferences: {
-        preload: path.join(__dirname, '../preload/index.js'),
+        preload: getPreloadPath(),
         backgroundThrottling: false, // 窗口最小化时是否继续动画和定时器
         contextIsolation: true, // 禁用上下文隔离, 渲染进程和preload共用window对象
         nodeIntegration: false, // 渲染进程禁止直接使用 Node
@@ -411,8 +475,9 @@ class WindowManager {
     if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
       this.mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
     } else {
-      console.log('[Window] 生产模式下加载文件:', path.join(__dirname, '../renderer/index.html'))
-      this.mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+      const rendererPath = getRendererPath('index.html')
+      console.log('[Window] 生产模式下加载文件:', rendererPath)
+      this.mainWindow.loadFile(rendererPath)
     }
 
     // 等待页面加载完成后再处理错误
@@ -479,7 +544,10 @@ class WindowManager {
       }
     })
 
-    this.startMouseStateTracking()
+    if (process.env.ZTOOLS_E2E !== '1') {
+      // 系统级鼠标监听不属于界面冒烟测试范围，避免请求权限和产生全局副作用。
+      this.startMouseStateTracking()
+    }
 
     this.mainWindow.on('show', () => {
       // 开始恢复焦点流程，防止 focus 事件监听器修改 lastFocusTarget
@@ -505,7 +573,7 @@ class WindowManager {
 
     // 阻止窗口被销毁（Command+W 时隐藏而不是关闭）
     this.mainWindow.on('close', (event) => {
-      if (!this.isQuitting) {
+      if (process.env.ZTOOLS_E2E !== '1' && !this.isQuitting) {
         event.preventDefault()
 
         // 若当前处于插件页面，先退出插件回到主搜索框
@@ -584,15 +652,25 @@ class WindowManager {
 
   /**
    * 创建托盘菜单
+   *
+   * @returns 无返回值。
    */
   private createTrayMenu(): void {
     if (!this.tray) return
 
+    // 使用普通菜单项显示游戏模式状态，避免原生 checkbox 为整个菜单预留勾选栏。
     this.trayMenu = Menu.buildFromTemplate([
       {
         label: '显示/隐藏',
         click: () => {
           this.toggleWindow()
+        }
+      },
+      {
+        label: dndManager.manualEnabled ? '游戏模式 ✓' : '游戏模式',
+        click: () => {
+          dndManager.toggleManual()
+          this.refreshTrayMenu()
         }
       },
       {
@@ -623,6 +701,14 @@ class WindowManager {
         }
       }
     ])
+  }
+
+  public refreshTrayMenu(): void {
+    if (!this.tray) return
+    this.createTrayMenu()
+    if (platform.isLinux) {
+      this.tray.setContextMenu(this.trayMenu)
+    }
   }
 
   /**
@@ -664,7 +750,7 @@ class WindowManager {
     if (this.isDoubleTapShortcut(keyToRegister)) {
       const modifier = keyToRegister.split('+')[0]
       doubleTapManager.register(modifier, () => {
-        this.toggleWindowFromDoubleTap()
+        if (!dndManager.shouldIgnoreHotkeys()) this.toggleWindowFromDoubleTap()
       })
       this.currentShortcut = keyToRegister
       this.isDoubleTapMode = true
@@ -674,7 +760,7 @@ class WindowManager {
 
     // 普通快捷键模式：通过 globalShortcut 注册
     const ret = globalShortcut.register(keyToRegister, () => {
-      this.toggleWindow()
+      if (!dndManager.shouldIgnoreHotkeys()) this.toggleWindow()
     })
 
     if (!ret) {
@@ -683,11 +769,11 @@ class WindowManager {
       if (oldIsDoubleTapMode) {
         const oldModifier = oldShortcut.split('+')[0]
         doubleTapManager.register(oldModifier, () => {
-          this.toggleWindowFromDoubleTap()
+          if (!dndManager.shouldIgnoreHotkeys()) this.toggleWindowFromDoubleTap()
         })
       } else {
         globalShortcut.register(oldShortcut, () => {
-          this.toggleWindow()
+          if (!dndManager.shouldIgnoreHotkeys()) this.toggleWindow()
         })
       }
       return false
@@ -700,8 +786,24 @@ class WindowManager {
     return ret
   }
 
+  /**
+   * 设置主窗口关闭后需要恢复的前台窗口。
+   * @param windowInfo 要记录的窗口信息，传入 null 时清除已有记录。
+   * @returns 无返回值。
+   */
   public setPreviousActiveWindow(windowInfo: typeof this.previousActiveWindow): void {
     this.previousActiveWindow = windowInfo
+  }
+
+  /**
+   * 捕获当前前台窗口，供不显示主窗口的启动链路保留本次操作目标。
+   * @returns 捕获到的窗口信息；无法获取时返回 null 并清除旧记录。
+   */
+  public captureCurrentActiveWindow(): typeof this.previousActiveWindow {
+    // 即使本次捕获失败也要清除旧值，避免后续 API 误用上一次启动留下的窗口。
+    const currentWindow = clipboardManager.getCurrentWindow()
+    this.previousActiveWindow = currentWindow
+    return currentWindow
   }
 
   /**
@@ -756,12 +858,7 @@ class WindowManager {
     const willShow = !(this.mainWindow.isFocused() && this.mainWindow.isVisible())
     if (willShow) {
       // Double-tap 的 uiohook 回调刚触发后，系统可能补发一次 transient blur，短暂忽略避免刚显示就关闭。
-      this.suppressBlurHide = true
-      if (this.doubleTapSuppressBlurTimer) clearTimeout(this.doubleTapSuppressBlurTimer)
-      this.doubleTapSuppressBlurTimer = setTimeout(() => {
-        this.suppressBlurHide = false
-        this.doubleTapSuppressBlurTimer = null
-      }, 350)
+      this.suppressBlurHideTransiently(350)
     }
 
     this.toggleWindow()
@@ -782,19 +879,18 @@ class WindowManager {
   private forceActivateWindow(): void {
     if (!this.mainWindow) return
 
-    // 1. 显示窗口
-    this.mainWindow.show()
-
-    // 2. macOS特殊处理：重申置顶，防止因为系统事件掉层级
+    // macOS 使用非激活 panel 保留原应用的前台状态。短暂抑制呼出瞬间的 blur，
+    // 但不要激活整个应用，否则会破坏快捷面板不抢占原应用焦点的交互语义。
     if (platform.isMacOS) {
+      this.suppressBlurHideTransiently(200)
       this.mainWindow.setAlwaysOnTop(true, 'modal-panel', 1)
+      this.mainWindow.show()
       return
     }
 
-    // 3. 设置窗口层级为最前
+    // Windows / Linux：显示后重申层级并聚焦
+    this.mainWindow.show()
     this.mainWindow.setAlwaysOnTop(true)
-
-    // 4. 聚焦窗口
     this.mainWindow.focus()
   }
 
@@ -843,28 +939,68 @@ class WindowManager {
   }
 
   /**
-   * 将窗口移动到鼠标所在显示器
-   * 优先恢复该显示器记忆的位置，否则居中显示
+   * 根据窗口呼出位置策略将窗口移动到目标显示器并定位
+   * - remember：优先恢复该显示器记忆的位置，否则居中
+   * - cursor：鼠标所在显示器居中
+   * - primary：主显示器居中
+   * - lastActive：上次活动窗口所在显示器居中（无记录时 fallback 到鼠标屏）
    */
   private moveWindowToCursor(): void {
     if (!this.mainWindow) return
 
-    const { width, height, x: displayX, y: displayY, id: displayId } = this.getDisplayAtCursor()
+    let target: { width: number; height: number; x: number; y: number; id: number }
 
-    const savedPosition = this.windowPositionsByDisplay[displayId]
-
-    let x: number, y: number
-
-    if (savedPosition) {
-      // 恢复该显示器记忆的位置
-      x = savedPosition.x
-      y = savedPosition.y
-    } else {
-      // 计算默认居中位置（基于最大窗口高度）
-      x = displayX + Math.floor((width - WINDOW_WIDTH) / 2)
-      y = displayY + Math.floor((height - WINDOW_DEFAULT_HEIGHT) / 2)
+    switch (this.windowPositionStrategy) {
+      case 'primary': {
+        const display = screen.getPrimaryDisplay()
+        target = { ...display.workArea, id: display.id }
+        break
+      }
+      case 'lastActive': {
+        const prev = this.previousActiveWindow
+        if (
+          prev &&
+          typeof prev.x === 'number' &&
+          typeof prev.y === 'number' &&
+          Number.isFinite(prev.x) &&
+          Number.isFinite(prev.y)
+        ) {
+          const centerX =
+            prev.x +
+            (typeof prev.width === 'number' && Number.isFinite(prev.width)
+              ? Math.floor(prev.width / 2)
+              : 0)
+          const centerY =
+            prev.y +
+            (typeof prev.height === 'number' && Number.isFinite(prev.height)
+              ? Math.floor(prev.height / 2)
+              : 0)
+          const display = screen.getDisplayNearestPoint({ x: centerX, y: centerY })
+          target = { ...display.workArea, id: display.id }
+        } else {
+          target = this.getDisplayAtCursor()
+        }
+        break
+      }
+      case 'cursor': {
+        target = this.getDisplayAtCursor()
+        break
+      }
+      case 'remember':
+      default: {
+        const { width, height, x: displayX, y: displayY, id: displayId } = this.getDisplayAtCursor()
+        const savedPosition = this.windowPositionsByDisplay[displayId]
+        if (savedPosition) {
+          this.mainWindow.setPosition(savedPosition.x, savedPosition.y, false)
+          return
+        }
+        target = { width, height, x: displayX, y: displayY, id: displayId }
+        break
+      }
     }
 
+    const x = target.x + Math.floor((target.width - WINDOW_WIDTH) / 2)
+    const y = target.y + Math.floor((target.height - WINDOW_DEFAULT_HEIGHT) / 2)
     this.mainWindow.setPosition(x, y, false)
   }
 
@@ -906,17 +1042,23 @@ class WindowManager {
   }
 
   /**
-   * 隐藏窗口
+   * 隐藏主窗口，并按需恢复隐藏前的前台窗口。
+   * @param _restoreFocus 是否恢复隐藏前的前台窗口。
+   * @returns 无返回值。
    */
   public hideWindow(_restoreFocus: boolean = true): void {
     console.log('[Window] 隐藏窗口', _restoreFocus)
 
-    // 记录当前的焦点状态（在隐藏之前）
-    this.recordFocusState()
+    const wasMainWindowVisible = this.mainWindow?.isVisible() === true
+
+    // 只有主窗口实际显示过，才记录并恢复其隐藏前的焦点状态。
+    if (wasMainWindowVisible) {
+      this.recordFocusState()
+    }
 
     this.mainWindow?.hide()
-    if (_restoreFocus) {
-      this.restorePreviousWindow()
+    if (_restoreFocus && wasMainWindowVisible) {
+      void this.restorePreviousWindow()
     }
 
     // 启动自动返回搜索定时器
@@ -1052,6 +1194,14 @@ class WindowManager {
   public async updateAutoBackToSearch(config: string): Promise<void> {
     this.autoBackToSearchConfig = config
     console.log('[Window] 更新自动返回搜索配置:', config)
+  }
+
+  /**
+   * 更新窗口呼出位置策略
+   */
+  public async updateWindowPositionStrategy(strategy: string): Promise<void> {
+    this.windowPositionStrategy = strategy
+    console.log('[Window] 更新窗口呼出位置策略:', strategy)
   }
 
   /**
@@ -1346,6 +1496,60 @@ class WindowManager {
   }
 
   /**
+   * 打开设置插件中的指定插件市场详情页。
+   * @param pluginName 需要展示详情的插件名称
+   * @returns 打开结果；无法启动设置插件时包含错误信息
+   */
+  public async showPluginMarketDetail(
+    pluginName: string
+  ): Promise<{ success: boolean; error?: string }> {
+    const normalizedName = pluginName.trim()
+    if (!this.mainWindow || !normalizedName) {
+      return { success: false, error: '无效的插件名称' }
+    }
+
+    // 切换到设置插件前释放当前插件视图，避免两个插件视图重叠。
+    if (pluginManager.getCurrentPluginPath() !== null) {
+      pluginManager.hidePluginView()
+      this.notifyBackToSearch()
+    }
+
+    try {
+      const settingPlugin = this.findSettingPlugin()
+      if (!settingPlugin) {
+        return { success: false, error: '未找到设置插件' }
+      }
+
+      // 复用设置插件现有的市场详情跳转事件协议。
+      const result = await api.launchPlugin({
+        path: settingPlugin.path,
+        type: 'plugin',
+        featureCode: 'function.plugin-market-search',
+        name: '插件市场',
+        cmdType: 'over',
+        param: {
+          code: 'function.plugin-market-search',
+          type: 'detail',
+          payload: normalizedName
+        }
+      })
+      if (!result.success) {
+        return { success: false, error: result.error || '打开插件市场失败' }
+      }
+
+      this.moveWindowToCursor()
+      this.forceActivateWindow()
+      return { success: true }
+    } catch (error: unknown) {
+      console.error('[Window] 打开插件市场详情失败:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : '打开插件市场失败'
+      }
+    }
+  }
+
+  /**
    * 从数据库查找 setting 插件
    */
   private findSettingPlugin(): any {
@@ -1415,9 +1619,15 @@ class WindowManager {
       }
 
       this.moveWindowToCursor()
-      // macOS: forceActivateWindow 不会 setAlwaysOnTop/focus，需要单独处理焦点抢占
-      this.mainWindow.show()
       if (platform.isMacOS) {
+        // 与 forceActivateWindow 一致的激活顺序：先重申 Spaces/层级、激活应用到当前 Space，
+        // 再 show，避免面板落到桌面 Space。此处不直接调用 forceActivateWindow：本路径已用
+        // 外层手动 suppressBlurHide（500ms 释放）覆盖激活期，forceActivateWindow 内部的瞬时
+        // 抑制(200ms)会把它提前释放。
+        this.mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+        this.mainWindow.setAlwaysOnTop(true, 'modal-panel', 1)
+        app.focus({ steal: true })
+        this.mainWindow.show()
         this.mainWindow.focus()
       } else {
         this.forceActivateWindow()

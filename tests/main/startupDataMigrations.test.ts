@@ -1,12 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import path from 'path'
+import { pathToFileURL } from 'url'
 
 const mockDbGet = vi.hoisted(() => vi.fn())
 const mockDbPut = vi.hoisted(() => vi.fn())
+const mockDbRemove = vi.hoisted(() => vi.fn())
 
 vi.mock('../../src/main/api/shared/database.js', () => ({
   default: {
     dbGet: mockDbGet,
-    dbPut: mockDbPut
+    dbPut: mockDbPut,
+    dbRemove: mockDbRemove
   }
 }))
 
@@ -19,7 +23,11 @@ vi.mock('../../src/main/core/internalPlugins.js', () => ({
   isBundledInternalPlugin: vi.fn(() => false)
 }))
 
-import { cleanupLegacyWebSearchReferences } from '../../src/main/core/startupDataMigrations'
+import {
+  cleanupLegacyWebSearchReferences,
+  migrateLegacyFileUrls,
+  migrateHostStorageKeys
+} from '../../src/main/core/startupDataMigrations'
 
 describe('startupDataMigrations', () => {
   beforeEach(() => {
@@ -97,5 +105,95 @@ describe('startupDataMigrations', () => {
     expect(mockDbPut).toHaveBeenCalledWith('super-panel-pinned', [
       { path: '/system', type: 'plugin', featureCode: 'clear' }
     ])
+  })
+
+  it('renames camel-case host keys and preserves canonical values', () => {
+    const stores: Record<string, any> = {
+      autoStartPlugin: ['legacy', 'shared'],
+      'auto-start-plugin': ['current', 'shared'],
+      detachedWindowSizes: { legacy: { width: 400 } },
+      'detached-window-sizes': { current: { width: 500 } }
+    }
+    mockDbGet.mockImplementation((key: string) => stores[key] ?? null)
+
+    migrateHostStorageKeys()
+
+    expect(mockDbPut).toHaveBeenCalledWith('auto-start-plugin', ['current', 'shared', 'legacy'])
+    expect(mockDbPut).toHaveBeenCalledWith('detached-window-sizes', {
+      legacy: { width: 400 },
+      current: { width: 500 }
+    })
+    expect(mockDbRemove).toHaveBeenCalledWith('autoStartPlugin')
+    expect(mockDbRemove).toHaveBeenCalledWith('detachedWindowSizes')
+  })
+
+  it('converts the legacy mainPush denylist into the 3.0 allowlist', () => {
+    const stores: Record<string, any> = {
+      disabledMainPushPlugin: ['blocked'],
+      plugins: [{ name: 'enabled' }, { name: 'blocked' }]
+    }
+    mockDbGet.mockImplementation((key: string) => stores[key] ?? null)
+
+    migrateHostStorageKeys()
+
+    expect(mockDbPut).toHaveBeenCalledWith('enabled-main-push-plugin', ['enabled'])
+    expect(mockDbRemove).toHaveBeenCalledWith('disabledMainPushPlugin')
+  })
+
+  it('repairs migrated plugin, history, and avatar file URLs idempotently', () => {
+    const homeDir = path.join(path.sep, 'Users', 'tester')
+    const legacyUserDataPath = path.join(homeDir, 'Library', 'Application Support', 'ZTools')
+    const oldPluginLogo = pathToFileURL(
+      path.join(legacyUserDataPath, 'plugins', 'demo', 'logo.png')
+    ).href
+    const currentPluginLogo = pathToFileURL(
+      path.join(homeDir, '.ztools', 'plugins', 'current', 'logo.png')
+    ).href
+    const stores: Record<string, any> = {
+      plugins: [
+        {
+          name: 'demo',
+          path: path.join(homeDir, '.ztools', 'plugins', 'demo'),
+          logo: oldPluginLogo,
+          features: [{ code: 'demo', icon: oldPluginLogo }]
+        },
+        { name: 'current', logo: currentPluginLogo }
+      ],
+      'command-history': [{ name: 'Demo', type: 'plugin', icon: oldPluginLogo }],
+      'settings-general': {
+        avatar: pathToFileURL(path.join(legacyUserDataPath, 'avatar', 'avatar.png')).href,
+        homepage: 'https://example.com/image.png'
+      }
+    }
+    mockDbGet.mockImplementation((key: string) => stores[key] ?? null)
+    mockDbPut.mockImplementation((key: string, value: any) => {
+      stores[key] = value
+    })
+
+    migrateLegacyFileUrls({ homeDir, legacyUserDataPath })
+
+    const migratedPluginLogo = pathToFileURL(
+      path.join(homeDir, '.ztools', 'plugins', 'demo', 'logo.png')
+    ).href
+    expect(mockDbPut).toHaveBeenCalledWith('plugins', [
+      {
+        name: 'demo',
+        path: path.join(homeDir, '.ztools', 'plugins', 'demo'),
+        logo: migratedPluginLogo,
+        features: [{ code: 'demo', icon: migratedPluginLogo }]
+      },
+      { name: 'current', logo: currentPluginLogo }
+    ])
+    expect(mockDbPut).toHaveBeenCalledWith('command-history', [
+      { name: 'Demo', type: 'plugin', icon: migratedPluginLogo }
+    ])
+    expect(mockDbPut).toHaveBeenCalledWith('settings-general', {
+      avatar: pathToFileURL(path.join(homeDir, '.ztools', 'avatar', 'avatar.png')).href,
+      homepage: 'https://example.com/image.png'
+    })
+
+    mockDbPut.mockClear()
+    migrateLegacyFileUrls({ homeDir, legacyUserDataPath })
+    expect(mockDbPut).not.toHaveBeenCalled()
   })
 })

@@ -4,6 +4,7 @@ import path from 'path'
 import { pinyin as getPinyin } from 'pinyin-pro'
 import databaseAPI from '../shared/database'
 import { openDialog } from '../../utils/windowUtils'
+import { launchApp } from '../../core/commandLauncher'
 
 /**
  * 本地启动项类型
@@ -28,10 +29,30 @@ const LOCAL_SHORTCUTS_KEY = 'local-shortcuts'
  */
 export class LocalShortcutsAPI {
   private mainWindow: Electron.BrowserWindow | null = null
+  private commandsCacheInvalidator: (() => void) | null = null
 
   public init(mainWindow: Electron.BrowserWindow): void {
     this.mainWindow = mainWindow
     this.setupIPC()
+  }
+
+  /**
+   * 设置本地启动项变化时使用的命令缓存失效回调。
+   * @param invalidator 命令缓存失效函数
+   * @returns 无返回值
+   */
+  public setCommandsCacheInvalidator(invalidator: () => void): void {
+    this.commandsCacheInvalidator = invalidator
+  }
+
+  /**
+   * 通知渲染进程本地启动项已变化，并使指令缓存失效。
+   * 使指令缓存失效后，快捷键设置页重新获取 getCommands 时才能拿到最新的本地启动项。
+   * @returns 无返回值
+   */
+  private notifyShortcutsChanged(): void {
+    this.mainWindow?.webContents.send('local-shortcuts-changed')
+    this.commandsCacheInvalidator?.()
   }
 
   private setupIPC(): void {
@@ -43,6 +64,9 @@ export class LocalShortcutsAPI {
       this.addShortcutByPath(filePath)
     )
     ipcMain.handle('local-shortcuts:delete', (_event, id: string) => this.deleteShortcut(id))
+    ipcMain.handle('local-shortcuts:delete-when-not-exist', (_event) =>
+      this.deleteNotExistShortcut()
+    )
     ipcMain.handle('local-shortcuts:open', (_event, shortcutPath: string) =>
       this.openShortcut(shortcutPath)
     )
@@ -116,7 +140,8 @@ export class LocalShortcutsAPI {
         // Windows 可执行文件或快捷方式视为应用
         if (
           process.platform === 'win32' &&
-          (selectedPath.endsWith('.exe') || selectedPath.endsWith('.lnk'))
+          (selectedPath.toLowerCase().endsWith('.exe') ||
+            selectedPath.toLowerCase().endsWith('.lnk'))
         ) {
           itemType = 'app'
         } else {
@@ -185,7 +210,7 @@ export class LocalShortcutsAPI {
       console.log('[LocalShortcut] 添加本地启动项成功:', shortcut.name)
 
       // 通知渲染进程刷新本地启动项
-      this.mainWindow?.webContents.send('local-shortcuts-changed')
+      this.notifyShortcutsChanged()
 
       return { success: true }
     } catch (error) {
@@ -220,7 +245,8 @@ export class LocalShortcutsAPI {
         // Windows 可执行文件或快捷方式视为应用
         if (
           process.platform === 'win32' &&
-          (selectedPath.endsWith('.exe') || selectedPath.endsWith('.lnk'))
+          (selectedPath.toLowerCase().endsWith('.exe') ||
+            selectedPath.toLowerCase().endsWith('.lnk'))
         ) {
           itemType = 'app'
         } else {
@@ -289,7 +315,7 @@ export class LocalShortcutsAPI {
       console.log('[LocalShortcut] 添加本地启动项成功:', shortcut.name)
 
       // 通知渲染进程刷新本地启动项
-      this.mainWindow?.webContents.send('local-shortcuts-changed')
+      this.notifyShortcutsChanged()
 
       return { success: true }
     } catch (error) {
@@ -315,7 +341,7 @@ export class LocalShortcutsAPI {
       console.log('[LocalShortcut] 删除本地启动项成功:', id)
 
       // 通知渲染进程刷新本地启动项
-      this.mainWindow?.webContents.send('local-shortcuts-changed')
+      this.notifyShortcutsChanged()
 
       return { success: true }
     } catch (error) {
@@ -361,7 +387,7 @@ export class LocalShortcutsAPI {
       )
 
       // 通知渲染进程刷新本地启动项
-      this.mainWindow?.webContents.send('local-shortcuts-changed')
+      this.notifyShortcutsChanged()
 
       return { success: true }
     } catch (error) {
@@ -375,7 +401,13 @@ export class LocalShortcutsAPI {
    */
   private async openShortcut(shortcutPath: string): Promise<{ success: boolean; error?: string }> {
     try {
-      // 使用 shell.openPath 打开文件/文件夹/应用
+      const shortcut = this.getAllShortcuts().find((item) => item.path === shortcutPath)
+      if (process.platform === 'win32' && shortcut?.type === 'app') {
+        await launchApp(shortcutPath)
+        return { success: true }
+      }
+
+      // 文件和文件夹保持系统默认打开行为。
       const result = await shell.openPath(shortcutPath)
 
       if (result) {
@@ -387,6 +419,45 @@ export class LocalShortcutsAPI {
       return { success: true }
     } catch (error) {
       console.error('[LocalShortcut] 打开本地启动项失败:', error)
+      return { success: false, error: error instanceof Error ? error.message : '未知错误' }
+    }
+  }
+
+  private async deleteNotExistShortcut(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const shortcuts = this.getAllShortcuts()
+      const checks = await Promise.all(
+        shortcuts.map(async (cur) => {
+          try {
+            await fs.access(cur.path)
+            return { shortcut: cur, exists: true }
+          } catch {
+            return { shortcut: cur, exists: false }
+          }
+        })
+      )
+
+      const existShortcuts: LocalShortcut[] = []
+      const notExistShortcuts: string[] = []
+
+      for (const check of checks) {
+        if (check.exists) {
+          existShortcuts.push(check.shortcut)
+        } else {
+          notExistShortcuts.push(check.shortcut.id)
+        }
+      }
+
+      databaseAPI.dbPut(LOCAL_SHORTCUTS_KEY, existShortcuts)
+
+      console.log('[LocalShortcut] 删除失效本地启动项成功:', notExistShortcuts.toString())
+
+      // 通知渲染进程刷新本地启动项
+      this.notifyShortcutsChanged()
+
+      return { success: true }
+    } catch (error) {
+      console.error('[LocalShortcut] 删除失效本地启动项失败:', error)
       return { success: false, error: error instanceof Error ? error.message : '未知错误' }
     }
   }

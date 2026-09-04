@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import { WindowManager } from '../../core/native'
-import clipboardManager from '../../managers/clipboardManager'
+import clipboardManager, { type ClipboardWriteContentData } from '../../managers/clipboardManager'
 import windowManager from '../../managers/windowManager'
 
 /**
@@ -11,6 +11,11 @@ export class ClipboardAPI {
     this.setupIPC()
   }
 
+  /**
+   * 注册剪贴板历史、内容写入和配置管理相关的 IPC 处理器。
+   *
+   * @returns 无返回值
+   */
   private setupIPC(): void {
     // 获取剪贴板历史
     ipcMain.handle(
@@ -96,11 +101,7 @@ export class ClipboardAPI {
     // 直接写入内容并粘贴
     ipcMain.handle(
       'clipboard:write-content',
-      async (
-        _event,
-        data: { type: 'text' | 'image'; content: string },
-        shouldPaste: boolean = true
-      ) => {
+      async (_event, data: ClipboardWriteContentData, shouldPaste: boolean = true) => {
         // 先隐藏窗口
         windowManager.hideWindow()
         // 设置窗口激活状态

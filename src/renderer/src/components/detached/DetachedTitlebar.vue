@@ -1,10 +1,10 @@
 <template>
-  <div :class="['titlebar', platform]">
+  <div :class="['titlebar', platform, { 'is-compact': compactWindowHeader }]">
     <!-- macOS 不显示自定义交通灯，使用系统原生的 -->
 
     <!-- 插件图标和名称 -->
     <div class="plugin-info" @dblclick="handleDblClick">
-      <div class="logo-container">
+      <div :class="['logo-container', { 'ai-active': aiRequestStatus !== 'idle' }]">
         <!-- AI 状态动画层 -->
         <div v-if="aiRequestStatus !== 'idle'" class="ai-animation-layer">
           <!-- 蒙版层 -->
@@ -36,6 +36,51 @@
 
     <!-- 工具按钮 -->
     <div class="toolbar">
+      <!-- 当前插件存在市场新版本时显示，展开层向左覆盖以保持右侧工具位置稳定。 -->
+      <div
+        v-if="hasPluginUpdate"
+        class="plugin-upgrade-slot"
+        :class="{
+          expanded: pluginUpdateStatus === 'upgrading' || pluginUpdateStatus === 'error'
+        }"
+      >
+        <div
+          class="plugin-upgrade-control"
+          :class="{
+            upgrading: pluginUpdateStatus === 'upgrading',
+            error: pluginUpdateStatus === 'error'
+          }"
+          :title="pluginUpgradeTitle"
+        >
+          <div class="plugin-upgrade-actions">
+            <button
+              type="button"
+              class="plugin-upgrade-action market-action"
+              :disabled="pluginUpdateStatus === 'upgrading'"
+              @click.stop="handleOpenPluginMarket"
+            >
+              进入市场查看
+            </button>
+            <button
+              type="button"
+              class="plugin-upgrade-action upgrade-now-action"
+              :disabled="pluginUpdateStatus === 'upgrading'"
+              @click.stop="handleUpgradePlugin"
+            >
+              {{ pluginUpgradeActionText }}
+            </button>
+          </div>
+          <button
+            type="button"
+            class="plugin-upgrade-trigger"
+            :aria-label="pluginUpgradeTitle"
+            @click.stop
+          >
+            <PluginUpgradeIcon />
+          </button>
+        </div>
+      </div>
+
       <!-- 插件设置按钮 -->
       <button class="toolbar-btn" title="插件设置" @click="showPluginSettings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
@@ -122,10 +167,16 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import PluginUpgradeIcon from '@renderer/assets/icons/plugin-upgrade.svg?component'
 import { normalizeConfigList } from '@shared/pluginSettings'
+import {
+  resolveMainPushMenuState,
+  toggleMainPushSetting
+} from '../../composables/useMainPushSetting'
 import AdaptiveIcon from '../common/AdaptiveIcon.vue'
 import { CommonKeyboardModifier, readModifiers } from '@renderer/utils/convertKeyboardEvent'
+import type { AiRequestStatus, AiRequestStatusChange } from '@shared/aiRequestStatus'
 
 const platform = ref<'darwin' | 'win32'>('darwin')
 const pluginName = ref('Plugin')
@@ -138,10 +189,169 @@ const isPinned = ref(false)
 const searchInputRef = ref<HTMLInputElement | null>(null)
 const acrylicLightOpacity = ref(78) // 亚克力明亮模式透明度（默认 78%）
 const acrylicDarkOpacity = ref(50) // 亚克力暗黑模式透明度（默认 50%）
-const aiRequestStatus = ref<'idle' | 'sending' | 'receiving'>('idle') // AI 请求状态
-const primaryColor = ref('blue')
+const aiRequestStatus = ref<AiRequestStatus>('idle') // AI 请求状态
+const primaryColor = ref('green')
 const customColor = ref('#db2777')
+const compactWindowHeader = ref(false)
 
+type PluginUpdateStatus = 'idle' | 'available' | 'upgrading' | 'error'
+
+interface PluginMarketDownloadProgress {
+  pluginName: string
+  taskId: string
+  status: 'downloading' | 'installing' | 'success' | 'error' | 'cancelled'
+  progress: number | null
+  receivedBytes?: number
+  totalBytes?: number
+  error?: string
+}
+
+const pluginUpdateStatus = ref<PluginUpdateStatus>('idle')
+const pluginUpdateName = ref('')
+const pluginCurrentVersion = ref('')
+const pluginLatestVersion = ref('')
+const pluginUpgradeProgress = ref<number | null>(null)
+const pluginUpgradeError = ref('')
+let pluginUpdateRequestSequence = 0
+let cleanupPluginUpdateProgressListener: (() => void) | null = null
+let cleanupCompactWindowHeaderListener: (() => void) | null = null
+
+const hasPluginUpdate = computed(
+  () => pluginUpdateName.value === pluginId.value && pluginUpdateStatus.value !== 'idle'
+)
+const pluginUpgradeActionText = computed(() => {
+  if (pluginUpdateStatus.value === 'error') return '重试升级'
+  if (pluginUpdateStatus.value !== 'upgrading') return '立即升级'
+  if (pluginUpgradeProgress.value != null) {
+    return `升级 ${Math.round(pluginUpgradeProgress.value)}%`
+  }
+  return '正在安装'
+})
+const pluginUpgradeTitle = computed(() => {
+  if (pluginUpgradeError.value) return pluginUpgradeError.value
+  return `发现新版本 ${pluginLatestVersion.value}，当前版本 ${pluginCurrentVersion.value}`
+})
+
+/**
+ * 清空独立窗口当前插件的更新展示状态。
+ * @returns 无返回值
+ */
+function resetPluginUpdateState(): void {
+  pluginUpdateStatus.value = 'idle'
+  pluginUpdateName.value = ''
+  pluginCurrentVersion.value = ''
+  pluginLatestVersion.value = ''
+  pluginUpgradeProgress.value = null
+  pluginUpgradeError.value = ''
+}
+
+/**
+ * 检查独立窗口当前插件的市场版本，并丢弃插件切换后的过期响应。
+ * @returns 检查完成后结束的 Promise
+ */
+async function checkCurrentPluginUpdate(): Promise<void> {
+  const currentPluginName = pluginId.value
+  const currentPluginPath = pluginPath.value
+  const requestSequence = ++pluginUpdateRequestSequence
+  resetPluginUpdateState()
+  if (!currentPluginName || !currentPluginPath) return
+
+  try {
+    const result = await window.ztools.pluginUpdates.check(currentPluginName, currentPluginPath)
+    // 标题栏重载或插件上下文变化后，不允许旧响应覆盖当前状态。
+    if (
+      requestSequence !== pluginUpdateRequestSequence ||
+      pluginId.value !== currentPluginName ||
+      pluginPath.value !== currentPluginPath
+    ) {
+      return
+    }
+    if (!result.success || !result.updateAvailable || !result.latestVersion) return
+
+    pluginUpdateName.value = currentPluginName
+    pluginCurrentVersion.value = result.currentVersion || ''
+    pluginLatestVersion.value = result.latestVersion
+    pluginUpdateStatus.value = 'available'
+  } catch (error: unknown) {
+    // 更新检查失败不应阻断独立窗口插件的正常使用。
+    console.debug('[PluginUpdate] 独立窗口检查更新失败:', error)
+  }
+}
+
+/**
+ * 从独立标题栏打开当前插件的市场详情页。
+ * @returns 操作完成后结束的 Promise
+ */
+async function handleOpenPluginMarket(): Promise<void> {
+  const currentPluginName = pluginUpdateName.value
+  if (!currentPluginName || pluginUpdateStatus.value === 'upgrading') return
+
+  try {
+    const result = await window.ztools.pluginUpdates.openMarket(currentPluginName)
+    if (!result.success) {
+      alert(`打开插件市场失败: ${result.error || '未知错误'}`)
+    }
+  } catch (error: unknown) {
+    alert(`打开插件市场失败: ${error instanceof Error ? error.message : '未知错误'}`)
+  }
+}
+
+/**
+ * 从独立标题栏下载并安装当前插件的市场最新版本。
+ * @returns 升级完成后结束的 Promise
+ */
+async function handleUpgradePlugin(): Promise<void> {
+  const currentPluginName = pluginUpdateName.value
+  const currentPluginPath = pluginPath.value
+  if (!currentPluginName || !currentPluginPath || pluginUpdateStatus.value === 'upgrading') {
+    return
+  }
+
+  // 主进程会收起插件内容区，标题栏继续展示下载与安装进度。
+  pluginUpdateStatus.value = 'upgrading'
+  pluginUpgradeProgress.value = null
+  pluginUpgradeError.value = ''
+  try {
+    const result = await window.ztools.pluginUpdates.upgrade(currentPluginName, currentPluginPath)
+    if (!result.success) {
+      pluginUpdateStatus.value = 'error'
+      pluginUpgradeError.value = result.error || '升级失败'
+      alert(`插件升级失败: ${pluginUpgradeError.value}`)
+    } else {
+      resetPluginUpdateState()
+    }
+  } catch (error: unknown) {
+    pluginUpdateStatus.value = 'error'
+    pluginUpgradeError.value = error instanceof Error ? error.message : '升级失败'
+    alert(`插件升级失败: ${pluginUpgradeError.value}`)
+  }
+}
+
+/**
+ * 将主进程发送的市场下载进度同步到独立标题栏升级控件。
+ * @param payload 下载或安装阶段的进度数据
+ * @returns 无返回值
+ */
+function handlePluginUpgradeProgress(payload: PluginMarketDownloadProgress): void {
+  if (payload.pluginName !== pluginUpdateName.value) return
+
+  if (payload.status === 'downloading') {
+    pluginUpgradeProgress.value = payload.progress
+  } else if (payload.status === 'installing') {
+    pluginUpgradeProgress.value = null
+  } else if (payload.status === 'error' || payload.status === 'cancelled') {
+    pluginUpdateStatus.value = 'error'
+    pluginUpgradeError.value =
+      payload.error || (payload.status === 'cancelled' ? '升级已取消' : '升级失败')
+  }
+}
+
+/**
+ * 获取指定主题色在当前明暗模式下对应的颜色值。
+ * @param colorName 主题色名称
+ * @param isDark 当前是否为暗色模式
+ * @returns 可用于 CSS 的十六进制颜色值
+ */
 function getThemeColor(colorName: string, isDark: boolean): string {
   const colors: Record<string, { light: string; dark: string }> = {
     blue: { light: '#0284c7', dark: '#38bdf8' },
@@ -155,7 +365,8 @@ function getThemeColor(colorName: string, isDark: boolean): string {
   if (color) {
     return isDark ? color.dark : color.light
   }
-  return isDark ? '#38bdf8' : '#0284c7' // fallback blue
+  // 非法或未知名称统一回退到产品默认的绿色。
+  return isDark ? '#34d399' : '#059669'
 }
 
 function applyPrimaryColor(): void {
@@ -215,6 +426,14 @@ function applyAcrylicOverlay(): void {
 
 // 初始化
 onMounted(async () => {
+  // 仅监听当前独立标题栏发起的市场升级进度。
+  cleanupPluginUpdateProgressListener = window.ztools.pluginUpdates.onProgress(
+    handlePluginUpgradeProgress
+  )
+  cleanupCompactWindowHeaderListener = window.ztools.onUpdateCompactMainWindowHeader((enabled) => {
+    compactWindowHeader.value = enabled
+  })
+
   // 检测操作系统并添加类名
   const userAgent = navigator.userAgent.toLowerCase()
   const osPlatform = navigator.platform.toLowerCase()
@@ -231,6 +450,7 @@ onMounted(async () => {
     if (settings) {
       acrylicLightOpacity.value = settings.acrylicLightOpacity ?? 78
       acrylicDarkOpacity.value = settings.acrylicDarkOpacity ?? 50
+      compactWindowHeader.value = settings.compactMainWindowHeader === true
       console.log('标题栏加载亚克力透明度:', {
         light: acrylicLightOpacity.value,
         dark: acrylicDarkOpacity.value
@@ -310,6 +530,11 @@ onMounted(async () => {
     pluginId.value = data.pluginName // 保存实际的插件 name，用于数据库读写
     pluginPath.value = data.pluginPath || ''
     pluginLogo.value = data.pluginLogo
+    aiRequestStatus.value = data.aiRequestStatus || 'idle'
+    compactWindowHeader.value = data.compactWindowHeader === true
+
+    // 初始化信息到达后再检查版本，确保请求携带真实插件名和路径。
+    void checkCurrentPluginUpdate()
 
     // 设置窗口标题
     if (data.title) {
@@ -374,10 +599,22 @@ onMounted(async () => {
 
   // 监听 AI 状态变化
   if (window.ztools?.onAiStatusChanged) {
-    window.ztools.onAiStatusChanged((status: 'idle' | 'sending' | 'receiving') => {
-      aiRequestStatus.value = status
+    window.ztools.onAiStatusChanged((change: AiRequestStatusChange) => {
+      // 独立标题栏只消费自身插件的状态，避免其他窗口请求串扰。
+      if (change.pluginPath === pluginPath.value) {
+        aiRequestStatus.value = change.status
+      }
     })
   }
+})
+
+onUnmounted(() => {
+  // 释放进度监听并让尚未返回的版本请求失效。
+  cleanupPluginUpdateProgressListener?.()
+  cleanupPluginUpdateProgressListener = null
+  cleanupCompactWindowHeaderListener?.()
+  cleanupCompactWindowHeaderListener = null
+  pluginUpdateRequestSequence += 1
 })
 
 // 窗口控制
@@ -409,8 +646,8 @@ async function showPluginSettings(): Promise<void> {
     console.log('当前插件名称:', pluginName.value)
 
     // 读取当前插件的配置状态
-    const outKillPluginData = await window.ztools.dbGet('outKillPlugin')
-    const autoDetachPluginData = await window.ztools.dbGet('autoDetachPlugin')
+    const outKillPluginData = await window.ztools.dbGet('out-kill-plugin')
+    const autoDetachPluginData = await window.ztools.dbGet('auto-detach-plugin')
 
     console.log('读取到的配置数据:', { outKillPluginData, autoDetachPluginData })
 
@@ -421,9 +658,20 @@ async function showPluginSettings(): Promise<void> {
     const currentName = pluginId.value
     const isAutoKill = !!currentName && outKillPluginList.includes(currentName)
     const isAutoDetach = !!currentName && autoDetachPluginList.includes(currentName)
+    const mainPushState = await resolveMainPushMenuState(currentName)
 
     // 显示菜单
     const menuItems = [
+      ...(mainPushState.supported
+        ? [
+            {
+              id: 'toggle-main-push',
+              label: '搜索栏推送',
+              type: 'checkbox',
+              checked: mainPushState.enabled
+            }
+          ]
+        : []),
       {
         id: 'toggle-auto-kill',
         label: '退出到后台立即结束运行',
@@ -459,7 +707,7 @@ async function showPluginSettings(): Promise<void> {
       const updatedList = outKillPluginList.includes(currentName)
         ? outKillPluginList.filter((n) => n !== currentName)
         : [...outKillPluginList, currentName]
-      await window.ztools.dbPut('outKillPlugin', updatedList)
+      await window.ztools.dbPut('out-kill-plugin', updatedList)
       console.log('已更新“退出到后台立即结束运行”配置:', updatedList)
     } else if (result?.id === 'toggle-auto-detach') {
       // 切换“自动分离为独立窗口”
@@ -469,8 +717,10 @@ async function showPluginSettings(): Promise<void> {
       const updatedList = autoDetachPluginList.includes(currentName)
         ? autoDetachPluginList.filter((n) => n !== currentName)
         : [...autoDetachPluginList, currentName]
-      await window.ztools.dbPut('autoDetachPlugin', updatedList)
+      await window.ztools.dbPut('auto-detach-plugin', updatedList)
       console.log('已更新"自动分离为独立窗口"配置:', updatedList)
+    } else if (result?.id === 'toggle-main-push') {
+      await toggleMainPushSetting(currentName)
     }
   } catch (error) {
     console.error('显示插件设置菜单失败:', error)
@@ -489,7 +739,11 @@ function handleDblClick(): void {
   }
 }
 
-// 键盘事件处理
+/**
+ * 键盘事件处理，拦截并转发回车、Tab 及方向键至插件。
+ * @param event 键盘事件对象。
+ * @returns 无返回值。
+ */
 function handleKeydown(event: KeyboardEvent): void {
   // ESC 键清空输入
   if (event.key === 'Escape') {
@@ -502,11 +756,20 @@ function handleKeydown(event: KeyboardEvent): void {
     return
   }
 
-  // 回车键传递给插件
+  // 提取当前生效的修饰键
   const modifiers = readModifiers(event)
+
+  // 回车键传递给插件
   if (event.key === 'Enter') {
     event.preventDefault()
     sendKeyToPlugin('Enter', modifiers)
+    return
+  }
+
+  // Tab 键传递给插件（同时阻止宿主标题栏 DOM 焦点跳转）
+  if (event.key === 'Tab') {
+    event.preventDefault()
+    sendKeyToPlugin('Tab', modifiers)
     return
   }
 
@@ -522,7 +785,12 @@ function handleKeydown(event: KeyboardEvent): void {
   }
 }
 
-// 发送方向键到插件
+/**
+ * 发送方向键按键事件至插件。
+ * @param key 方向键键名（ArrowLeft/ArrowRight/ArrowUp/ArrowDown）。
+ * @param modifiers 修饰键列表。
+ * @returns 无返回值。
+ */
 function sendArrowKeyToPlugin(key: string, modifiers: CommonKeyboardModifier[] = []): void {
   const keyCodeMap: Record<string, string> = {
     ArrowLeft: 'Left',
@@ -550,7 +818,12 @@ function sendArrowKeyToPlugin(key: string, modifiers: CommonKeyboardModifier[] =
   }
 }
 
-// 发送按键到插件（用于回车键等）
+/**
+ * 发送通用功能键按键事件至插件（用于回车键、Tab 键等）。
+ * @param key 目标键名字符串（例如 'Enter'、'Tab'）。
+ * @param modifiers 修饰键列表。
+ * @returns 无返回值。
+ */
 function sendKeyToPlugin(key: string, modifiers: CommonKeyboardModifier[] = []): void {
   // 发送 keyDown 事件
   window.electron.ipcRenderer.send('send-arrow-key', {
@@ -590,6 +863,20 @@ body {
   padding-left: 90px; /* 为系统交通灯按钮留空间 */
 }
 
+.titlebar.is-compact {
+  height: 40px;
+}
+
+.titlebar.is-compact .logo-container,
+.titlebar.is-compact .plugin-logo {
+  width: 30px;
+  height: 30px;
+}
+
+.titlebar.is-compact .search-input {
+  height: 30px;
+}
+
 /* 插件信息 */
 .plugin-info {
   display: flex;
@@ -617,6 +904,12 @@ body {
   object-fit: contain;
   flex-shrink: 0;
   z-index: 0;
+  transition: border-radius 0.24s ease;
+}
+
+/* AI 调用期间将插件图标裁成圆形，避免圆形状态层外露出矩形四角。 */
+.logo-container.ai-active .plugin-logo {
+  border-radius: 50%;
 }
 
 /* AI 动画层 */
@@ -658,7 +951,7 @@ body {
   transform: translate(-50%, -50%);
   font-size: 11px;
   font-weight: 600;
-  color: var(--primary-color, #3b82f6);
+  color: var(--primary-color, #059669);
   z-index: 3;
   letter-spacing: 0.5px;
 }
@@ -681,7 +974,7 @@ body {
   width: 100%;
   height: 100%;
   border-radius: 50%;
-  border: 2px solid var(--primary-color, #3b82f6);
+  border: 2px solid var(--primary-color, #059669);
   position: absolute;
   left: 0;
   top: 0;
@@ -722,7 +1015,7 @@ body {
   width: 100%;
   height: 100%;
   border-radius: 50%;
-  border: 2px solid var(--primary-color, #3b82f6);
+  border: 2px solid var(--primary-color, #059669);
   position: absolute;
   left: 0;
   top: 0;
@@ -760,6 +1053,7 @@ body {
 /* 搜索栏 */
 .search-container {
   flex: 1;
+  min-width: 0;
   max-width: 300px;
   -webkit-app-region: no-drag;
 }
@@ -789,9 +1083,151 @@ body {
 /* 工具按钮 */
 .toolbar {
   display: flex;
+  align-items: center;
   gap: 4px;
   margin-left: auto;
   -webkit-app-region: no-drag;
+}
+
+.plugin-upgrade-slot {
+  position: relative;
+  z-index: 4;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  transition:
+    width 0.16s ease,
+    flex-basis 0.16s ease;
+}
+
+.plugin-upgrade-slot:hover,
+.plugin-upgrade-slot:focus-within,
+.plugin-upgrade-slot.expanded {
+  width: 198px;
+  flex-basis: 198px;
+}
+
+.plugin-upgrade-control {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  transition:
+    width 0.16s ease,
+    background-color 0.12s ease,
+    border-color 0.18s ease,
+    color 0.12s ease;
+}
+
+.plugin-upgrade-control:hover,
+.plugin-upgrade-control:focus-within,
+.plugin-upgrade-control.upgrading,
+.plugin-upgrade-control.error {
+  width: 198px;
+  border-color: color-mix(in srgb, var(--titlebar-text) 10%, transparent);
+  background: var(--input-bg);
+}
+
+.plugin-upgrade-actions {
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+}
+
+.plugin-upgrade-control:hover .plugin-upgrade-actions,
+.plugin-upgrade-control:focus-within .plugin-upgrade-actions,
+.plugin-upgrade-control.upgrading .plugin-upgrade-actions,
+.plugin-upgrade-control.error .plugin-upgrade-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.plugin-upgrade-trigger,
+.plugin-upgrade-action {
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--titlebar-text);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.plugin-upgrade-trigger {
+  width: 26px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 26px;
+  color: var(--primary-color);
+  border-left: 1px solid transparent;
+}
+
+.plugin-upgrade-trigger :deep(svg) {
+  width: 17px;
+  height: 17px;
+}
+
+.plugin-upgrade-action {
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.plugin-upgrade-action + .plugin-upgrade-action {
+  border-left: 1px solid color-mix(in srgb, var(--titlebar-text) 9%, transparent);
+}
+
+.plugin-upgrade-control:hover .plugin-upgrade-trigger,
+.plugin-upgrade-control:focus-within .plugin-upgrade-trigger,
+.plugin-upgrade-control.upgrading .plugin-upgrade-trigger,
+.plugin-upgrade-control.error .plugin-upgrade-trigger {
+  border-left-color: color-mix(in srgb, var(--titlebar-text) 9%, transparent);
+}
+
+.market-action:hover:not(:disabled),
+.upgrade-now-action:hover:not(:disabled),
+.plugin-upgrade-trigger:hover {
+  background: var(--hover-bg);
+}
+
+.upgrade-now-action {
+  min-width: 76px;
+  color: var(--primary-color);
+  font-weight: 500;
+}
+
+.plugin-upgrade-control.error {
+  border-color: color-mix(in srgb, #dc2626 24%, transparent);
+}
+
+.plugin-upgrade-control.error .upgrade-now-action {
+  color: #dc2626;
+}
+
+.plugin-upgrade-action:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.plugin-upgrade-trigger:focus-visible,
+.plugin-upgrade-action:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: -2px;
 }
 
 .toolbar-btn {
@@ -815,7 +1251,7 @@ body {
 
 .toolbar-btn.active {
   background: var(--hover-bg);
-  color: #0284c7; /* 固定使用默认蓝色 */
+  color: var(--primary-color);
 }
 
 /* Windows 窗口控制按钮 */

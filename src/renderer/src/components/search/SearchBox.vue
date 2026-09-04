@@ -2,6 +2,8 @@
   <div
     ref="searchBoxRef"
     class="search-box"
+    :class="{ 'is-compact': windowStore.compactMainWindowHeader }"
+    :style="{ height: `${mainWindowHeaderHeight}px` }"
     @mousedown="handleMouseDown"
     @dblclick="handleDoubleClick"
   >
@@ -135,6 +137,7 @@
           @keydown.down="(e) => keydownEvent(e, 'down')"
           @keydown.up="(e) => keydownEvent(e, 'up')"
           @keydown.enter="(e) => keydownEvent(e, 'enter')"
+          @keydown.tab="(e) => keydownEvent(e, 'tab')"
           @paste="handlePaste"
         />
       </div>
@@ -147,22 +150,68 @@
         <span class="tab-target-text">{{ tabHintText }}</span>
         <span class="tab-target-key">Tab</span>
       </div>
-      <!-- 更新提示（有下载好的更新时显示） -->
-      <div
-        v-if="windowStore.updateDownloadInfo.hasDownloaded && !windowStore.currentPlugin"
-        class="update-notification"
-        @click="handleUpdateClick"
-      >
-        <span class="update-text">新版本已下载，点击升级</span>
-        <UpdateIcon />
+      <!-- 更新提示 -->
+      <div v-if="windowStore.shouldShowUpdateNotification" class="update-notification">
+        <button class="update-action" type="button" @click="handleUpdateClick">
+          <span class="update-text">发现新版本，点击更新</span>
+          <UpdateIcon />
+        </button>
+        <button
+          class="update-dismiss"
+          type="button"
+          title="关闭本次提示"
+          aria-label="关闭更新提示"
+          @click="handleDismissUpdateNotification"
+        >
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <!-- 当前插件存在市场新版本时显示，展开层向左覆盖以避免右侧图标位移。 -->
+      <div v-if="hasPluginUpdate" class="plugin-upgrade-slot">
+        <div
+          class="plugin-upgrade-control"
+          :class="{
+            upgrading: pluginUpdateStatus === 'upgrading',
+            error: pluginUpdateStatus === 'error'
+          }"
+          :title="pluginUpgradeTitle"
+        >
+          <div class="plugin-upgrade-actions">
+            <button
+              type="button"
+              class="plugin-upgrade-action market-action"
+              :disabled="pluginUpdateStatus === 'upgrading'"
+              @click.stop="handleOpenPluginMarket"
+            >
+              进入市场查看
+            </button>
+            <button
+              type="button"
+              class="plugin-upgrade-action upgrade-now-action"
+              :disabled="pluginUpdateStatus === 'upgrading'"
+              @click.stop="handleUpgradePlugin"
+            >
+              {{ pluginUpgradeActionText }}
+            </button>
+          </div>
+          <button
+            type="button"
+            class="plugin-upgrade-trigger"
+            :aria-label="pluginUpgradeTitle"
+            @click.stop
+          >
+            <PluginUpgradeIcon />
+          </button>
+        </div>
       </div>
       <!-- 头像按钮（无更新或插件模式时显示） -->
       <div
-        v-else
+        v-if="!windowStore.shouldShowUpdateNotification"
         class="avatar-wrapper"
         :class="{
           loading: isPluginLoading,
           'is-default': isDefaultAvatar,
+          'ai-active': windowStore.aiRequestStatus !== 'idle',
           'ai-sending': windowStore.aiRequestStatus === 'sending',
           'ai-receiving': windowStore.aiRequestStatus === 'receiving'
         }"
@@ -217,8 +266,15 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import PluginUpgradeIcon from '@renderer/assets/icons/plugin-upgrade.svg?component'
+import { resolveMainWindowHeaderHeight } from '@shared/mainWindowLayout'
 import { normalizeConfigList } from '@shared/pluginSettings'
+import {
+  resolveMainPushMenuState,
+  toggleMainPushSetting
+} from '../../composables/useMainPushSetting'
 import { DEFAULT_AVATAR, useWindowStore } from '../../stores/windowStore'
+import type { NavDirectionKey } from '@renderer/utils/convertKeyboardEvent'
 import AdaptiveIcon from '../common/AdaptiveIcon.vue'
 import UpdateIcon from './UpdateIcon.vue'
 
@@ -227,6 +283,18 @@ interface FileItem {
   path: string
   name: string
   isDirectory: boolean
+}
+
+type PluginUpdateStatus = 'idle' | 'available' | 'upgrading' | 'error'
+
+interface PluginMarketDownloadProgress {
+  pluginName: string
+  taskId: string
+  status: 'downloading' | 'installing' | 'success' | 'error' | 'cancelled'
+  progress: number | null
+  receivedBytes?: number
+  totalBytes?: number
+  error?: string
 }
 
 const props = defineProps<{
@@ -243,17 +311,16 @@ const emit = defineEmits<{
   (e: 'update:pastedFiles', value: FileItem[] | null): void
   (e: 'update:pastedText', value: string | null): void
   (e: 'keydown', event: KeyboardEvent): void
-  (
-    e: 'arrow-keydown',
-    event: KeyboardEvent,
-    direction: 'left' | 'right' | 'up' | 'down' | 'enter'
-  ): void
+  (e: 'arrow-keydown', event: KeyboardEvent, direction: NavDirectionKey): void
   (e: 'composing', isComposing: boolean): void
   (e: 'settings-click'): void
   (e: 'close-plugin'): void
 }>()
 
 const windowStore = useWindowStore()
+const mainWindowHeaderHeight = computed(() =>
+  resolveMainWindowHeaderHeight(windowStore.compactMainWindowHeader)
+)
 
 const searchBoxRef = ref<HTMLDivElement | null>(null)
 const searchActionsRef = ref<HTMLDivElement | null>(null)
@@ -281,7 +348,7 @@ function getCurrentPluginName(): string | null {
  * 切换当前插件在指定行为设置中的选中状态。
  */
 async function toggleCurrentPluginVariantSetting(
-  key: 'outKillPlugin' | 'autoDetachPlugin' | 'autoStartPlugin'
+  key: 'out-kill-plugin' | 'auto-detach-plugin' | 'auto-start-plugin'
 ): Promise<void> {
   const currentPluginName = getCurrentPluginName()
   if (!currentPluginName) {
@@ -329,6 +396,143 @@ const isDefaultAvatar = computed(() => {
 })
 
 const isPluginLoading = computed(() => windowStore.pluginLoading)
+const pluginUpdateStatus = ref<PluginUpdateStatus>('idle')
+const pluginUpdateName = ref('')
+const pluginCurrentVersion = ref('')
+const pluginLatestVersion = ref('')
+const pluginUpgradeProgress = ref<number | null>(null)
+const pluginUpgradeError = ref('')
+let pluginUpdateRequestSequence = 0
+
+const hasPluginUpdate = computed(
+  () =>
+    !!windowStore.currentPlugin &&
+    pluginUpdateName.value === windowStore.currentPlugin.name &&
+    pluginUpdateStatus.value !== 'idle'
+)
+const pluginUpgradeActionText = computed(() => {
+  if (pluginUpdateStatus.value === 'error') return '重试升级'
+  if (pluginUpdateStatus.value !== 'upgrading') return '立即升级'
+  if (pluginUpgradeProgress.value != null) {
+    return `升级 ${Math.round(pluginUpgradeProgress.value)}%`
+  }
+  return '正在安装'
+})
+const pluginUpgradeTitle = computed(() => {
+  if (pluginUpgradeError.value) return pluginUpgradeError.value
+  return `发现新版本 ${pluginLatestVersion.value}，当前版本 ${pluginCurrentVersion.value}`
+})
+
+/**
+ * 清空当前插件的更新展示状态。
+ * @returns 无返回值
+ */
+function resetPluginUpdateState(): void {
+  pluginUpdateStatus.value = 'idle'
+  pluginUpdateName.value = ''
+  pluginCurrentVersion.value = ''
+  pluginLatestVersion.value = ''
+  pluginUpgradeProgress.value = null
+  pluginUpgradeError.value = ''
+}
+
+/**
+ * 异步检查当前插件的市场版本，并丢弃插件切换后到达的过期响应。
+ * @returns 检查完成后结束的 Promise
+ */
+async function checkCurrentPluginUpdate(): Promise<void> {
+  const plugin = windowStore.currentPlugin
+  const requestSequence = ++pluginUpdateRequestSequence
+  resetPluginUpdateState()
+  if (!plugin) return
+
+  try {
+    const result = await window.ztools.pluginUpdates.check(plugin.name, plugin.path)
+    // 插件切换后不允许旧请求覆盖新插件的界面状态。
+    if (
+      requestSequence !== pluginUpdateRequestSequence ||
+      windowStore.currentPlugin?.name !== plugin.name ||
+      windowStore.currentPlugin?.path !== plugin.path
+    ) {
+      return
+    }
+    if (!result.success || !result.updateAvailable || !result.latestVersion) return
+
+    pluginUpdateName.value = plugin.name
+    pluginCurrentVersion.value = result.currentVersion || ''
+    pluginLatestVersion.value = result.latestVersion
+    pluginUpdateStatus.value = 'available'
+  } catch (error: unknown) {
+    // 更新检查失败不应干扰插件正常打开，只保留调试日志。
+    console.debug('[PluginUpdate] 检查更新失败:', error)
+  }
+}
+
+/**
+ * 打开当前插件对应的市场详情页。
+ * @returns 操作完成后结束的 Promise
+ */
+async function handleOpenPluginMarket(): Promise<void> {
+  const pluginName = pluginUpdateName.value
+  if (!pluginName || pluginUpdateStatus.value === 'upgrading') return
+
+  try {
+    const result = await window.ztools.pluginUpdates.openMarket(pluginName)
+    if (!result.success) {
+      alert(`打开插件市场失败: ${result.error || '未知错误'}`)
+    }
+  } catch (error: unknown) {
+    alert(`打开插件市场失败: ${error instanceof Error ? error.message : '未知错误'}`)
+  }
+}
+
+/**
+ * 立即下载并安装当前插件的市场最新版本。
+ * @returns 升级完成后结束的 Promise
+ */
+async function handleUpgradePlugin(): Promise<void> {
+  const pluginName = pluginUpdateName.value
+  const pluginPath = windowStore.currentPlugin?.path
+  if (!pluginName || !pluginPath || pluginUpdateStatus.value === 'upgrading') return
+
+  // 安装器会先准备新实体，发布前才停止当前插件。
+  pluginUpdateStatus.value = 'upgrading'
+  pluginUpgradeProgress.value = null
+  pluginUpgradeError.value = ''
+  try {
+    const result = await window.ztools.pluginUpdates.upgrade(pluginName, pluginPath)
+    if (!result.success) {
+      pluginUpdateStatus.value = 'error'
+      pluginUpgradeError.value = result.error || '升级失败'
+      alert(`插件升级失败: ${pluginUpgradeError.value}`)
+    } else {
+      resetPluginUpdateState()
+    }
+  } catch (error: unknown) {
+    pluginUpdateStatus.value = 'error'
+    pluginUpgradeError.value = error instanceof Error ? error.message : '升级失败'
+    alert(`插件升级失败: ${pluginUpgradeError.value}`)
+  }
+}
+
+/**
+ * 将主进程发送的市场下载进度同步到当前升级控件。
+ * @param payload 下载或安装阶段的进度数据
+ * @returns 无返回值
+ */
+function handlePluginUpgradeProgress(payload: PluginMarketDownloadProgress): void {
+  if (payload.pluginName !== pluginUpdateName.value) return
+
+  if (payload.status === 'downloading') {
+    pluginUpgradeProgress.value = payload.progress
+  } else if (payload.status === 'installing') {
+    pluginUpgradeProgress.value = null
+  } else if (payload.status === 'error' || payload.status === 'cancelled') {
+    pluginUpdateStatus.value = 'error'
+    pluginUpgradeError.value =
+      payload.error || (payload.status === 'cancelled' ? '升级已取消' : '升级失败')
+  }
+}
 
 // Tab 键功能提示文字
 const tabHintText = computed(() => {
@@ -485,16 +689,19 @@ async function onKeydown(event: KeyboardEvent): Promise<void> {
   emit('keydown', event)
 }
 
-function keydownEvent(
-  event: KeyboardEvent,
-  direction: 'left' | 'right' | 'up' | 'down' | 'enter'
-): void {
-  // 如果正在输入法组合中,不触发键盘事件
+/**
+ * 处理搜索输入框的导航按键事件（方向键、回车键、Tab键），向上层派发转发或导航请求。
+ * @param event 键盘事件对象。
+ * @param direction 按键动作类型（'left' | 'right' | 'up' | 'down' | 'enter' | 'tab'）。
+ * @returns 无返回值。
+ */
+function keydownEvent(event: KeyboardEvent, direction: NavDirectionKey): void {
+  // 处于输入法组合态时，忽略导航与按键转发，避免打断拼音选词
   if (isComposing.value) {
     return
   }
 
-  // 如果输入框有选中的文字,不触发列表导航（仅搜索模式下生效，插件模式下需要转发给插件）
+  // 搜索模式下若存在文本选中态，阻止列表导航以优先保障输入框文本编辑行为
   if (
     props.currentView !== 'plugin' &&
     inputRef.value &&
@@ -504,6 +711,7 @@ function keydownEvent(
     return
   }
 
+  // 向父组件派发按键动作，供上层决定列表导航或转发给插件
   emit('arrow-keydown', event, direction)
 }
 
@@ -826,12 +1034,14 @@ watch(
   () => windowStore.currentPlugin,
   () => {
     updateInputWidth()
+    void checkCurrentPluginUpdate()
   }
 )
 
 // 用于清理的 ResizeObserver
 let resizeObserver: ResizeObserver | null = null
 let cleanupContextMenuListener: (() => void) | null = null
+let cleanupPluginUpdateProgressListener: (() => void) | null = null
 
 onMounted(() => {
   // 初始化输入框宽度（updateInputWidth 内部会根据是否有内容来决定宽度）
@@ -856,9 +1066,15 @@ onMounted(() => {
   }
 
   // 监听 AI 状态变化
-  window.ztools.onAiStatusChanged?.((status: 'idle' | 'sending' | 'receiving') => {
-    windowStore.setAiRequestStatus(status)
+  window.ztools.onAiStatusChanged?.((change) => {
+    windowStore.setAiRequestStatus(change)
   })
+
+  // 升级进度只监听当前主窗口发起的市场安装任务。
+  cleanupPluginUpdateProgressListener = window.ztools.pluginUpdates.onProgress(
+    handlePluginUpgradeProgress
+  )
+  void checkCurrentPluginUpdate()
 
   // 监听菜单命令
   cleanupContextMenuListener?.()
@@ -888,23 +1104,30 @@ onMounted(() => {
       }
     } else if (command === 'toggle-auto-kill') {
       try {
-        await toggleCurrentPluginVariantSetting('outKillPlugin')
+        await toggleCurrentPluginVariantSetting('out-kill-plugin')
       } catch (error: any) {
         console.error('切换自动结束配置失败:', error)
         alert(`操作失败: ${error.message || '未知错误'}`)
       }
     } else if (command === 'toggle-auto-detach') {
       try {
-        await toggleCurrentPluginVariantSetting('autoDetachPlugin')
+        await toggleCurrentPluginVariantSetting('auto-detach-plugin')
       } catch (error: any) {
         console.error('切换自动分离配置失败:', error)
         alert(`操作失败: ${error.message || '未知错误'}`)
       }
     } else if (command === 'toggle-auto-start') {
       try {
-        await toggleCurrentPluginVariantSetting('autoStartPlugin')
+        await toggleCurrentPluginVariantSetting('auto-start-plugin')
       } catch (error: any) {
         console.error('切换跟随启动配置失败:', error)
+        alert(`操作失败: ${error.message || '未知错误'}`)
+      }
+    } else if (command === 'toggle-main-push') {
+      try {
+        await toggleMainPushSetting(getCurrentPluginName())
+      } catch (error: any) {
+        console.error('切换搜索栏推送配置失败:', error)
         alert(`操作失败: ${error.message || '未知错误'}`)
       }
     }
@@ -947,11 +1170,11 @@ async function handleSettingsClick(): Promise<void> {
     let autoDetachPlugins: string[] = []
     let autoStartPlugins: string[] = []
     try {
-      const killData = await window.ztools.dbGet('outKillPlugin')
+      const killData = await window.ztools.dbGet('out-kill-plugin')
       outKillPlugins = normalizeConfigList(killData)
-      const detachData = await window.ztools.dbGet('autoDetachPlugin')
+      const detachData = await window.ztools.dbGet('auto-detach-plugin')
       autoDetachPlugins = normalizeConfigList(detachData)
-      const startData = await window.ztools.dbGet('autoStartPlugin')
+      const startData = await window.ztools.dbGet('auto-start-plugin')
       autoStartPlugins = normalizeConfigList(startData)
     } catch (error) {
       console.log('读取配置失败（可能不存在）:', error)
@@ -962,6 +1185,7 @@ async function handleSettingsClick(): Promise<void> {
     const isAutoKill = !!currentPluginName && outKillPlugins.includes(currentPluginName)
     const isAutoDetach = !!currentPluginName && autoDetachPlugins.includes(currentPluginName)
     const isAutoStart = !!currentPluginName && autoStartPlugins.includes(currentPluginName)
+    const mainPushState = await resolveMainPushMenuState(currentPluginName)
 
     // 根据平台显示不同的快捷键
     const platform = window.ztools.getPlatform()
@@ -974,6 +1198,16 @@ async function handleSettingsClick(): Promise<void> {
       {
         label: '插件设置',
         submenu: [
+          ...(mainPushState.supported
+            ? [
+                {
+                  id: 'toggle-main-push',
+                  label: '搜索栏推送',
+                  type: 'checkbox',
+                  checked: mainPushState.enabled
+                }
+              ]
+            : []),
           {
             id: 'toggle-auto-kill',
             label: '退出到后台立即结束运行',
@@ -1007,32 +1241,35 @@ async function handleSettingsClick(): Promise<void> {
 
 async function handleUpdateClick(): Promise<void> {
   try {
-    // 确认升级
-    const confirmed = confirm(
-      `确定要升级到版本 ${windowStore.updateDownloadInfo.version} 吗？\n\n应用将重启以完成升级。`
-    )
-    if (!confirmed) {
-      return
-    }
-
-    // 执行升级
-    const result = await window.ztools.updater.installDownloadedUpdate()
+    const result = await window.ztools.updater.showUpdateWindow()
     if (!result.success) {
-      alert(`升级失败: ${result.error}`)
+      alert(`打开更新窗口失败: ${result.error}`)
     }
   } catch (error: any) {
-    console.error('升级失败:', error)
-    alert(`升级失败: ${error.message || '未知错误'}`)
+    console.error('打开更新窗口失败:', error)
+    alert(`打开更新窗口失败: ${error.message || '未知错误'}`)
   }
 }
 
+/**
+ * 关闭当前版本的更新提示，关闭状态仅在本次应用运行期间有效。
+ * @returns 无返回值
+ */
+function handleDismissUpdateNotification(): void {
+  windowStore.dismissUpdateNotification()
+}
+
 onUnmounted(() => {
+  // 使仍在途中的版本查询结果失效。
+  pluginUpdateRequestSequence++
   resizeObserver?.disconnect()
   cleanupDrag()
 
   // 清理右键菜单命令监听
   cleanupContextMenuListener?.()
   cleanupContextMenuListener = null
+  cleanupPluginUpdateProgressListener?.()
+  cleanupPluginUpdateProgressListener = null
 
   // 清理拖放事件监听
   if (searchBoxRef.value) {
@@ -1063,6 +1300,105 @@ defineExpose({
   user-select: none; /* 禁止选取文本 */
   border-radius: 0; /* 组件本身不要圆角 */
   height: 58px;
+}
+
+.search-box.is-compact {
+  padding-block: 3px;
+  padding-inline: 8px;
+}
+
+.search-box.is-compact .measure-text,
+.search-box.is-compact .placeholder-text,
+.search-box.is-compact .search-input {
+  font-size: 20px;
+}
+
+.search-box.is-compact .search-input {
+  height: 38px;
+}
+
+.search-box.is-compact .pasted-image-thumbnail {
+  width: 38px;
+  height: 38px;
+}
+
+.search-box.is-compact .pasted-files,
+.search-box.is-compact .pasted-text {
+  height: 32px;
+  padding-inline: 10px;
+}
+
+.search-box.is-compact .plugin-tag {
+  height: 32px;
+  border-radius: 16px;
+  padding-right: 3px;
+}
+
+.search-box.is-compact .plugin-tag-left {
+  height: 32px;
+  gap: 5px;
+  padding: 6px 7px;
+}
+
+.search-box.is-compact .plugin-tag.has-cmd .plugin-tag-left {
+  padding-right: 18px;
+}
+
+.search-box.is-compact .plugin-tag-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.search-box.is-compact .plugin-tag-title {
+  font-size: 15px;
+}
+
+.search-box.is-compact .plugin-tag-cmd {
+  font-size: 13px;
+  padding-inline: 3px;
+}
+
+.search-box.is-compact .plugin-tag-close {
+  width: 18px;
+  height: 18px;
+}
+
+.search-box.is-compact .search-btn,
+.search-box.is-compact .avatar-container {
+  width: 34px;
+  height: 34px;
+}
+
+.search-box.is-compact .avatar-spinner {
+  right: -3px;
+  width: 40px;
+  height: 40px;
+}
+
+.search-box.is-compact .update-notification {
+  border-radius: 7px;
+}
+
+.search-box.is-compact .update-action {
+  gap: 6px;
+  padding: 4px 6px 4px 9px;
+}
+
+.search-box.is-compact .update-text {
+  font-size: 12px;
+}
+
+.search-box.is-compact .update-action :deep(svg) {
+  width: 26px;
+  height: 26px;
+}
+
+.search-box.is-compact .update-dismiss {
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  font-size: 14px;
 }
 
 /* 拖放蒙版 */
@@ -1411,6 +1747,146 @@ defineExpose({
   -webkit-app-region: no-drag; /* 头像区域不可拖动 */
 }
 
+.plugin-upgrade-slot {
+  position: relative;
+  z-index: 4;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+}
+
+.plugin-upgrade-control {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  transition:
+    width 0.16s ease,
+    background-color 0.12s ease,
+    border-color 0.18s ease,
+    color 0.12s ease;
+}
+
+.plugin-upgrade-control:hover,
+.plugin-upgrade-control:focus-within,
+.plugin-upgrade-control.upgrading,
+.plugin-upgrade-control.error {
+  width: 198px;
+  border-color: color-mix(in srgb, var(--text-color) 10%, transparent);
+  background: var(--control-bg);
+}
+
+.plugin-upgrade-actions {
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.1s ease;
+}
+
+.plugin-upgrade-control:hover .plugin-upgrade-actions,
+.plugin-upgrade-control:focus-within .plugin-upgrade-actions,
+.plugin-upgrade-control.upgrading .plugin-upgrade-actions,
+.plugin-upgrade-control.error .plugin-upgrade-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.plugin-upgrade-trigger,
+.plugin-upgrade-action {
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-color);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.plugin-upgrade-trigger {
+  width: 28px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  color: var(--primary-color);
+}
+
+.plugin-upgrade-trigger :deep(svg) {
+  width: 18px;
+  height: 18px;
+}
+
+.plugin-upgrade-action {
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.plugin-upgrade-action + .plugin-upgrade-action {
+  border-left: 1px solid color-mix(in srgb, var(--text-color) 9%, transparent);
+}
+
+.plugin-upgrade-trigger {
+  border-left: 1px solid transparent;
+}
+
+.plugin-upgrade-control:hover .plugin-upgrade-trigger,
+.plugin-upgrade-control:focus-within .plugin-upgrade-trigger,
+.plugin-upgrade-control.upgrading .plugin-upgrade-trigger,
+.plugin-upgrade-control.error .plugin-upgrade-trigger {
+  border-left-color: color-mix(in srgb, var(--text-color) 9%, transparent);
+}
+
+.market-action:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.upgrade-now-action {
+  min-width: 76px;
+  color: var(--primary-color);
+  font-weight: 500;
+}
+
+.upgrade-now-action:hover:not(:disabled) {
+  background: var(--hover-bg);
+}
+
+.plugin-upgrade-trigger:hover {
+  background: var(--hover-bg);
+}
+
+.plugin-upgrade-control.error {
+  border-color: color-mix(in srgb, #dc2626 24%, transparent);
+}
+
+.plugin-upgrade-control.error .upgrade-now-action {
+  color: #dc2626;
+}
+
+.plugin-upgrade-action:disabled {
+  cursor: default;
+  opacity: 0.62;
+}
+
+.plugin-upgrade-trigger:focus-visible,
+.plugin-upgrade-action:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: -2px;
+}
+
 /* Tab 键目标提示 */
 .tab-target-hint {
   display: flex;
@@ -1443,24 +1919,77 @@ defineExpose({
 }
 
 .update-notification {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  padding: 6px 12px;
+  overflow: visible;
   border-radius: 8px;
   background: rgba(16, 185, 129, 0.1);
-  transition: all 0.2s;
+  transition: background 0.2s;
   -webkit-app-region: no-drag;
 }
 
 .update-notification:hover {
   background: rgba(16, 185, 129, 0.2);
-  transform: scale(1.02);
 }
 
-.update-notification:active {
-  transform: scale(0.98);
+.update-action,
+.update-dismiss {
+  border: none;
+  background: transparent;
+  color: #10b981;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.update-action {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+}
+
+.update-action:active {
+  opacity: 0.7;
+}
+
+.update-dismiss {
+  position: absolute;
+  z-index: 1;
+  top: -5px;
+  right: -5px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 4px;
+  font-size: 16px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transform: scale(0.85);
+  transition:
+    opacity 0.15s,
+    transform 0.15s;
+}
+
+.update-notification:hover .update-dismiss,
+.update-dismiss:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: scale(1);
+}
+
+.update-dismiss:hover {
+  background: rgba(16, 185, 129, 0.24);
+}
+
+.update-action:focus-visible,
+.update-dismiss:focus-visible {
+  outline: 2px solid #10b981;
+  outline-offset: -2px;
 }
 
 .update-text {
@@ -1476,7 +2005,10 @@ defineExpose({
   border-radius: 50%;
   object-fit: cover;
   cursor: pointer;
-  transition: all 0.2s;
+  transition:
+    transform 0.2s,
+    box-shadow 0.2s,
+    border-radius 0.24s ease;
   -webkit-app-region: no-drag;
   /* 按钮不可拖动 */
   border: none;
@@ -1489,6 +2021,11 @@ defineExpose({
 .search-btn.plugin-logo {
   border-radius: 6px;
   object-fit: contain;
+}
+
+/* AI 调用期间将插件图标裁成圆形，避免圆形状态层外露出矩形四角。 */
+.avatar-wrapper.ai-active .search-btn.plugin-logo {
+  border-radius: 50%;
 }
 
 .search-btn:not(.plugin-logo):hover {

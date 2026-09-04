@@ -19,7 +19,7 @@ interface ApiEndpoint {
   path: string
   desc: string
   auth: boolean
-  body?: Record<string, unknown>
+  body?: unknown
 }
 
 const apiEndpoints: ApiEndpoint[] = [
@@ -37,6 +37,18 @@ const apiEndpoints: ApiEndpoint[] = [
     path: '/api/window/toggle',
     desc: '切换 ZTools 主窗口显示/隐藏状态',
     auth: true
+  },
+  {
+    method: 'POST',
+    path: '/api/plugin/launch',
+    desc: '启动插件，支持传参。pluginName 对应 plugin.json 中的 name，code 和 type（text、over 等）也保持和 plugin.json 一致。type=files 时 payload 可传文件路径数组',
+    auth: true,
+    body: {
+      pluginName: '插件名称',
+      code: '功能 code',
+      type: 'text',
+      payload: '传给插件的内容'
+    }
   }
 ]
 
@@ -247,6 +259,7 @@ onMounted(() => {
               <button class="btn btn-sm copy-curl-btn" @click="copyCurl(item)">复制 curl</button>
             </div>
             <p class="api-desc">{{ item.desc }}</p>
+            <pre v-if="item.body" class="api-body">{{ JSON.stringify(item.body, null, 2) }}</pre>
           </div>
         </div>
 
@@ -459,6 +472,19 @@ onMounted(() => {
   font-size: 13px;
   color: var(--text-secondary);
   margin: 0;
+}
+
+.api-body {
+  font-family: 'SF Mono', 'Menlo', 'Monaco', monospace;
+  font-size: 12px;
+  padding: 10px 12px;
+  background: var(--hover-bg);
+  border-radius: 6px;
+  color: var(--text-color);
+  margin: 10px 0 0 0;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .docs-response {

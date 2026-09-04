@@ -5,6 +5,7 @@ import windowManager from '../../managers/windowManager.js'
 import detachedWindowManager from '../../core/detachedWindowManager.js'
 import { registerPluginApiServices } from './pluginApiDispatcher'
 import { getPluginSessionPartition } from '../../../shared/pluginRuntimeNamespace'
+import { getUrlScheme } from '../../utils/pluginUrl'
 
 /**
  * 插件独立窗口管理API - 插件专用
@@ -38,20 +39,38 @@ export class PluginWindowAPI {
           return
         }
 
-        // URL 安全校验不允许 http 访问
-        if (url.startsWith('http')) {
+        // 参数校验：url 必须是非空字符串
+        if (typeof url !== 'string' || !url.trim()) {
+          event.returnValue = new Error('createBrowserWindow: url 必须是非空字符串')
+          return
+        }
+
+        // URL 安全校验：只允许无 scheme 的相对路径与 file:// 绝对地址。
+        // 用 scheme 匹配而非 startsWith('http')：既放行 `http-api.html` 这类相对文件名，
+        // 也拦住 HTTP:（大写）、data:、javascript:、ws: 等旧检查漏掉的协议。
+        const scheme = getUrlScheme(url)
+        if (scheme && scheme !== 'file') {
           event.returnValue = new Error('The URL must be a local address starting with file://')
           return
         }
 
-        const win = pluginWindowManager.createWindow(
-          pluginInfo.path,
-          pluginInfo.name,
-          getPluginSessionPartition(pluginInfo.name),
-          url,
-          options,
-          event.sender
-        )
+        // resolvePluginWindowUrl 在 url 缺少路径部分时会抛错，需要转成 Error 返回值，
+        // 否则 sendSync 返回空值会让插件端在 result.methods.forEach 处炸出难以诊断的 TypeError
+        let win: Electron.BrowserWindow
+        try {
+          win = pluginWindowManager.createWindow(
+            pluginInfo.path,
+            pluginInfo.name,
+            getPluginSessionPartition(pluginInfo.name),
+            url,
+            options,
+            event.sender
+          )
+        } catch (error) {
+          console.error('[pluginWindow:create] 创建插件窗口失败', error)
+          event.returnValue = error instanceof Error ? error : new Error(String(error))
+          return
+        }
 
         // 返回白名单数组（与 utools 返回值结构一致）
         event.returnValue = {

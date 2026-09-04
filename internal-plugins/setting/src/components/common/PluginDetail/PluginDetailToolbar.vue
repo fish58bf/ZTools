@@ -3,12 +3,12 @@ defineProps<{
   isRunning?: boolean
   isDevelopment?: boolean
   installed?: boolean
-  canUpgrade: boolean
   // 已安装插件特有
   isPinned?: boolean
   isDisabled?: boolean
   showPinButton?: boolean
   showDisableToggle?: boolean
+  showMarketButton?: boolean
   // 设置
   showSettingsDropdown: boolean
   isAutoKill: boolean
@@ -22,6 +22,7 @@ const emit = defineEmits<{
   (e: 'open'): void
   (e: 'kill'): void
   (e: 'open-folder'): void
+  (e: 'open-market'): void
   (e: 'uninstall'): void
   (e: 'toggle-pin'): void
   (e: 'toggle-disabled', disabled: boolean): void
@@ -40,7 +41,7 @@ function handleDisabledToggle(event: Event): void {
 </script>
 
 <template>
-  <template v-if="installed && !canUpgrade">
+  <template v-if="installed">
     <button
       class="icon-btn topbar-action-btn open-btn"
       title="打开"
@@ -63,6 +64,14 @@ function handleDisabledToggle(event: Event): void {
       @click="emit('open-folder')"
     >
       <div class="i-z-folder font-size-16px" />
+    </button>
+    <button
+      v-if="showMarketButton"
+      class="icon-btn topbar-action-btn market-btn"
+      title="查看市场详情"
+      @click="emit('open-market')"
+    >
+      <div class="i-z-store font-size-16px" />
     </button>
     <button class="icon-btn topbar-action-btn delete-btn" title="卸载" @click="emit('uninstall')">
       <div class="i-z-trash font-size-16px" />
@@ -192,6 +201,14 @@ function handleDisabledToggle(event: Event): void {
 }
 
 .topbar-action-btn.folder-btn:hover {
+  background: var(--primary-light-bg);
+}
+
+.topbar-action-btn.market-btn {
+  color: var(--primary-color);
+}
+
+.topbar-action-btn.market-btn:hover {
   background: var(--primary-light-bg);
 }
 

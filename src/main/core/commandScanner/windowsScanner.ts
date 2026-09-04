@@ -1,10 +1,9 @@
-import { shell } from 'electron'
-import fsPromises from 'fs/promises'
-import path from 'path'
 import { extractAcronym } from '../../utils/common'
-import { getWindowsScanPaths } from '../../utils/systemPaths'
-import { MuiResolver } from '../native/index'
-import { Command } from './types'
+import { getWindowsFlatScanPaths, getWindowsRecursiveScanPaths } from '../../utils/systemPaths'
+import { toZToolsIconUrl } from '../../common/iconUtils'
+import { WindowsShortcutScanner, type WindowsShortcutInfo } from '../native/index'
+import type { ApplicationScanResult, Command } from './types'
+import { pLimit } from './utils'
 
 // ========== 配置 ==========
 
@@ -30,293 +29,115 @@ export const SKIP_NAME_PATTERN =
 
 // ========== 辅助函数 ==========
 
+interface WindowsScanSource {
+  path: string
+  recursive: boolean
+}
+
+interface WindowsScanSourceResult {
+  source: WindowsScanSource
+  entries: WindowsShortcutInfo[]
+  error?: unknown
+}
+
+/**
+ * Windows 扫描实现说明：
+ *
+ * 原 TS 实现里的这些步骤现在都已迁移到原生模块：
+ * - 解析 desktop.ini 中的 [LocalizedFileNames] 段。
+ *   desktop.ini 通常是 UTF-16LE 编码（带 BOM），部分为 UTF-8。
+ *   条目值可能是纯文本或 MUI 引用（@dll,-id）。
+ * - 批量解析 MUI 资源字符串（如 @%SystemRoot%\system32\shell32.dll,-22067）。
+ *   通过 Win32 API 解析 Windows 系统快捷方式的本地化显示名称。
+ * - 解析 .url 文件，提取 URL 和 IconFile 字段。
+ *   跳过普通网页链接（http/https），保留其他应用协议（如 steam://）。
+ * - 处理单个快捷方式 entry（.url / .lnk）：解析、过滤、入列。
+ *   递归与扁平扫描共用，仅处理文件 entry；目录的下钻 / 跳过由原生模块决定。
+ * - 从 Start Menu 根目录递归扫描全部子树。
+ *   处理子目录时跳过 SDK、示例、文档等开发相关文件夹。
+ * - 扁平扫描用户桌面和公共桌面。
+ *   仅处理本层文件，避免遍历桌面中的大型工程目录。
+ *
+ * TS 层保留最终的名称过滤、图标协议封装、首字母缩写和去重，避免业务侧行为变化。
+ */
+
 // 检查是否应该跳过该快捷方式（仅按名称过滤）
 export function shouldSkipShortcut(name: string): boolean {
   return SKIP_NAME_PATTERN.test(name)
 }
 
 /**
- * 解析 desktop.ini 中的 [LocalizedFileNames] 段。
- * desktop.ini 通常是 UTF-16LE 编码（带 BOM），部分为 UTF-8。
- * 返回 { fileName → value } 的映射，value 可能是纯文本或 MUI 引用（@dll,-id）。
- */
-async function parseDesktopIni(dirPath: string): Promise<Map<string, string>> {
-  const entries = new Map<string, string>()
-  const iniPath = path.join(dirPath, 'desktop.ini')
-
-  try {
-    const buf = await fsPromises.readFile(iniPath)
-    // 检测 BOM 来判断编码：FF FE = UTF-16LE，否则 UTF-8
-    const content =
-      buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe
-        ? buf.toString('utf16le')
-        : buf.toString('utf8')
-
-    let inSection = false
-    for (const line of content.split(/\r?\n/)) {
-      const t = line.trim()
-      if (t === '[LocalizedFileNames]') {
-        inSection = true
-        continue
-      }
-      if (t.startsWith('[')) {
-        inSection = false
-        continue
-      }
-      if (inSection && t.includes('=')) {
-        const eqIdx = t.indexOf('=')
-        const fileName = t.slice(0, eqIdx)
-        const value = t.slice(eqIdx + 1)
-        if (fileName && value) {
-          entries.set(fileName, value)
-        }
-      }
-    }
-  } catch {
-    // 文件不存在或无法读取，正常忽略
-  }
-
-  return entries
-}
-
-/**
- * 批量解析 MUI 资源字符串（如 @%SystemRoot%\system32\shell32.dll,-22067）。
- * 通过原生模块调用 Win32 API 实现。
- */
-function resolveMuiStrings(muiRefs: string[]): Map<string, string> {
-  if (muiRefs.length === 0) return new Map()
-  return MuiResolver.resolve(muiRefs)
-}
-
-/**
- * 获取文件的本地化显示名称（Windows 特有）。
- * Windows 系统快捷方式的磁盘文件名通常是英文（如 File Explorer.lnk），
- * 但通过 desktop.ini + MUI 资源显示为本地化名称（如"文件资源管理器"）。
+ * 将 Windows 应用图标源路径转换为动态图标协议 URL。
  *
- * 分两步：
- * 1. Node.js 直接读取 desktop.ini（纯文件 I/O + 解析）
- * 2. 遇到 MUI 引用（@dll,-id）时，批量交给原生模块解析（Win32 API）
+ * @param appPath 用于提取图标的快捷方式、可执行文件或图片路径。
+ * @returns 编码后的 ztools-icon URL。
  */
-async function getLocalizedDisplayNames(dirPaths: string[]): Promise<Map<string, string>> {
-  const nameMap = new Map<string, string>()
-
-  if (process.platform !== 'win32') return nameMap
-
-  try {
-    // 第 1 步：用 Node.js 递归读取所有 desktop.ini，收集本地化条目
-    const pendingMui = new Map<string, string[]>() // muiRef → [fullPath, ...]
-
-    async function scanDir(dirPath: string): Promise<void> {
-      const iniEntries = await parseDesktopIni(dirPath)
-
-      for (const [fileName, value] of iniEntries) {
-        const fullPath = path.join(dirPath, fileName)
-        if (value.startsWith('@')) {
-          // MUI 引用，稍后批量解析
-          const arr = pendingMui.get(value) || []
-          arr.push(fullPath)
-          pendingMui.set(value, arr)
-        } else {
-          // 纯文本，直接使用
-          nameMap.set(fullPath.toLowerCase(), value)
-        }
-      }
-
-      // 递归子目录
-      try {
-        const entries = await fsPromises.readdir(dirPath, { withFileTypes: true })
-        for (const entry of entries) {
-          if (entry.isDirectory()) {
-            await scanDir(path.join(dirPath, entry.name))
-          }
-        }
-      } catch {
-        // 目录不可读，忽略
-      }
-    }
-
-    for (const dirPath of dirPaths) {
-      await scanDir(dirPath)
-    }
-
-    // 第 2 步：批量解析 MUI 引用（通过原生模块调用 Win32 API）
-    if (pendingMui.size > 0) {
-      const muiRefs = Array.from(pendingMui.keys())
-      const resolved = resolveMuiStrings(muiRefs)
-
-      for (const [ref, localizedName] of resolved) {
-        const filePaths = pendingMui.get(ref) || []
-        for (const fp of filePaths) {
-          nameMap.set(fp.toLowerCase(), localizedName)
-        }
-      }
-    }
-
-    console.log(`[Scanner] 获取到 ${nameMap.size} 个本地化文件名映射`)
-  } catch (error) {
-    // 失败不影响扫描，降级使用磁盘文件名
-    console.error('[Scanner] 获取本地化显示名称失败（将使用文件名）:', error)
-  }
-
-  return nameMap
-}
-
-// 生成图标 URL
 export function getIconUrl(appPath: string): string {
-  // 将绝对路径编码为 URL
-  return `ztools-icon://${encodeURIComponent(appPath)}`
+  return toZToolsIconUrl(appPath)
 }
 
-// 解析 .url 文件，提取 URL 和 IconFile 字段
-export interface UrlFileInfo {
-  url: string
-  iconFile: string
-}
-
-export async function parseUrlFile(filePath: string): Promise<UrlFileInfo | null> {
-  try {
-    const content = await fsPromises.readFile(filePath, 'utf-8')
-    let url = ''
-    let iconFile = ''
-
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim()
-      if (trimmed.startsWith('URL=')) {
-        url = trimmed.slice(4)
-      } else if (trimmed.startsWith('IconFile=')) {
-        iconFile = trimmed.slice(9)
-      }
-    }
-
-    if (!url) return null
-
-    // 跳过普通网页链接（http/https），保留其他应用协议（如 steam://）
-    const lowerUrl = url.toLowerCase()
-    if (lowerUrl.startsWith('http://') || lowerUrl.startsWith('https://')) {
-      return null
-    }
-
-    return { url, iconFile }
-  } catch {
+/**
+ * 将原生模块扫描结果转换为 Command。
+ *
+ * desktop.ini 本地化名称、MUI 解析、.url 解析、.lnk 目标解析已迁移到原生模块实现；
+ * TS 层只保留名称过滤、图标协议封装、首字母缩写和去重字段整理。
+ */
+function toCommand(entry: WindowsShortcutInfo): (Command & { _dedupeTarget?: string }) | null {
+  if (!entry.name || !entry.path) {
     return null
   }
+
+  if (shouldSkipShortcut(entry.name)) {
+    return null
+  }
+
+  // 始终使用原生模块返回的启动路径：
+  // - .lnk：使用快捷方式路径，Windows Shell API 能正确处理参数、工作目录等
+  // - .url 或 .lnk 指向 .url：使用应用协议链接（已在原生模块跳过 http/https）
+  // 图标使用原生模块返回的 icon 源路径，再封装成 ztools-icon:// 协议
+  return {
+    name: entry.name,
+    path: entry.path,
+    icon: getIconUrl(entry.icon || entry.path),
+    acronym: extractAcronym(entry.name),
+    _dedupeTarget: entry.targetPath || undefined
+  }
 }
 
-// 递归扫描目录中的快捷方式
-async function scanDirectory(
-  dirPath: string,
-  apps: Command[],
-  displayNameMap: Map<string, string>
-): Promise<void> {
+/**
+ * 将未知异常转换为可持久记录的错误文本。
+ *
+ * @param error 捕获到的任意异常值。
+ * @returns 适合日志和扫描结果的错误文本。
+ */
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * 在独立 runner 中扫描单个 Windows 来源，限制失败只影响该来源。
+ *
+ * @param source 扫描路径及是否递归的配置。
+ * @returns 当前来源扫描出的原生快捷方式条目。
+ * @throws runner 启动失败、native 异常、进程退出或超时时抛出。
+ */
+async function scanSource(source: WindowsScanSource): Promise<WindowsShortcutInfo[]> {
+  const recursivePaths = source.recursive ? [source.path] : []
+  const flatPaths = source.recursive ? [] : [source.path]
+  return WindowsShortcutScanner.scan(recursivePaths, flatPaths, SKIP_FOLDERS)
+}
+
+/**
+ * 扫描单个来源并把失败转换为结构化结果，避免并发池提前终止。
+ *
+ * @param source 扫描路径及递归配置。
+ * @returns 当前来源的条目或失败原因。
+ */
+async function scanSourceSafely(source: WindowsScanSource): Promise<WindowsScanSourceResult> {
   try {
-    const entries = await fsPromises.readdir(dirPath, { withFileTypes: true })
-
-    for (const entry of entries) {
-      const fullPath = path.join(dirPath, entry.name)
-
-      // 处理子目录
-      if (entry.isDirectory()) {
-        // 跳过 SDK、示例、文档等开发相关文件夹
-        if (SKIP_FOLDERS.includes(entry.name.toLowerCase())) {
-          continue
-        }
-        // 递归扫描子目录
-        await scanDirectory(fullPath, apps, displayNameMap)
-        continue
-      }
-
-      if (!entry.isFile()) continue
-
-      const ext = path.extname(entry.name).toLowerCase()
-
-      // 处理 .url 快捷方式（应用协议链接，如 steam://）
-      if (ext === '.url') {
-        const urlInfo = await parseUrlFile(fullPath)
-        if (!urlInfo) continue
-
-        // 优先使用本地化显示名称，降级为磁盘文件名
-        const appName =
-          displayNameMap.get(fullPath.toLowerCase()) || path.basename(entry.name, '.url')
-
-        // 过滤检查
-        if (SKIP_NAME_PATTERN.test(appName)) continue
-
-        // 图标：优先使用 .url 文件中的 IconFile，否则使用 .url 文件本身
-        const iconPath = urlInfo.iconFile || fullPath
-        const icon = getIconUrl(iconPath)
-
-        apps.push({
-          name: appName,
-          path: urlInfo.url, // 使用协议链接作为启动路径
-          icon,
-          acronym: extractAcronym(appName)
-        })
-        continue
-      }
-
-      // 处理 .lnk 快捷方式
-      if (ext !== '.lnk') continue
-
-      // 优先使用本地化显示名称，降级为磁盘文件名
-      // 解决 Windows 系统快捷方式文件名为英文（如 File Explorer.lnk）但显示名为中文的问题
-      const appName =
-        displayNameMap.get(fullPath.toLowerCase()) || path.basename(entry.name, '.lnk')
-
-      // 尝试解析快捷方式目标（必须先解析才能获取真实路径）
-      let shortcutDetails: Electron.ShortcutDetails | null = null
-      try {
-        shortcutDetails = shell.readShortcutLink(fullPath)
-      } catch {
-        // 解析失败，使用快捷方式本身
-      }
-
-      // 获取目标路径和应用路径
-      const targetPath = shortcutDetails?.target?.trim() || ''
-
-      // 如果 .lnk 指向 .url 文件，解析 .url 内容判断是否为应用协议
-      if (targetPath.toLowerCase().endsWith('.url')) {
-        const urlInfo = await parseUrlFile(targetPath)
-        if (!urlInfo) continue // http/https 或解析失败，跳过
-
-        if (SKIP_NAME_PATTERN.test(appName)) continue
-
-        const iconPath = urlInfo.iconFile || fullPath
-        const icon = getIconUrl(iconPath)
-
-        apps.push({
-          name: appName,
-          path: urlInfo.url,
-          icon,
-          acronym: extractAcronym(appName)
-        })
-        continue
-      }
-
-      // 过滤检查：仅按名称过滤（不按目标类型/路径过滤）
-      if (shouldSkipShortcut(appName)) {
-        continue
-      }
-
-      // 始终使用 .lnk 快捷方式路径作为启动路径
-      // Windows Shell API (shell.openPath) 能正确处理 .lnk 文件的启动（包括参数、工作目录等）
-      // 图标使用 .lnk 路径即可，SHGetFileInfoW 能正确解析快捷方式的图标（包括自定义图标）
-      const icon = getIconUrl(fullPath)
-
-      // 创建应用对象
-      // _dedupeTarget 用于去重：同名且指向同一目标的快捷方式只保留一个
-      // （用户开始菜单和系统开始菜单可能有同名同目标的 .lnk，路径不同但应合并）
-      const app: Command & { _dedupeTarget?: string } = {
-        name: appName,
-        path: fullPath,
-        icon,
-        acronym: extractAcronym(appName),
-        _dedupeTarget: targetPath || undefined
-      }
-
-      apps.push(app)
-    }
+    return { source, entries: await scanSource(source) }
   } catch (error) {
-    console.error(`[Scanner] 扫描目录失败 ${dirPath}:`, error)
+    return { source, entries: [], error }
   }
 }
 
@@ -340,33 +161,62 @@ export function deduplicateCommands(apps: (Command & { _dedupeTarget?: string })
   return Array.from(uniqueApps.values())
 }
 
-export async function scanApplications(): Promise<Command[]> {
+/**
+ * 扫描 Windows 快捷方式并转换为去重后的应用命令。
+ *
+ * @returns 扫描出的应用、完整性标记和失败来源摘要。
+ */
+export async function scanApplications(): Promise<ApplicationScanResult> {
   try {
-    const startTime = performance.now()
+    // 每个来源使用独立 runner，单个目录超时或崩溃时仍保留其他来源结果。
+    const sources: WindowsScanSource[] = [
+      ...getWindowsRecursiveScanPaths().map((path) => ({ path, recursive: true })),
+      ...getWindowsFlatScanPaths().map((path) => ({ path, recursive: false }))
+    ]
+    const sourceResults = await pLimit(
+      sources.map((source) => () => scanSourceSafely(source)),
+      2
+    )
+    const nativeEntries: WindowsShortcutInfo[] = []
+    const errors: string[] = []
 
-    const apps: Command[] = []
+    // 汇总成功来源；失败来源只记录诊断，不丢弃其他 runner 的结果。
+    sourceResults.forEach((result) => {
+      if (!result.error) {
+        nativeEntries.push(...result.entries)
+        return
+      }
 
-    // 获取 Windows 扫描路径（开始菜单 + 桌面）
-    const scanPaths = getWindowsScanPaths()
+      const { source } = result
+      const message = `${source.recursive ? 'recursive' : 'flat'}:${source.path}: ${getErrorMessage(result.error)}`
+      errors.push(message)
+      console.error(`[Scanner] Windows 来源扫描失败，已跳过 ${source.path}:`, result.error)
+    })
 
-    // 获取本地化显示名称（解决 Windows 系统快捷方式文件名为英文的问题）
-    const displayNameMap = await getLocalizedDisplayNames(scanPaths)
-
-    // 扫描所有目录
-    for (const menuPath of scanPaths) {
-      await scanDirectory(menuPath, apps, displayNameMap)
+    const apps: (Command & { _dedupeTarget?: string })[] = []
+    for (const entry of nativeEntries) {
+      try {
+        // 业务字段转换失败只跳过当前快捷方式，不影响其他已解析条目。
+        const command = toCommand(entry)
+        if (command) apps.push(command)
+      } catch (error) {
+        console.error(`[Scanner] Windows 快捷方式转换失败，已跳过 ${entry.path}:`, error)
+      }
     }
 
     const deduplicatedApps = deduplicateCommands(apps)
 
-    const endTime = performance.now()
     console.log(
-      `[Scanner] 扫描完成: ${apps.length} 个应用 -> 去重后 ${deduplicatedApps.length} 个, 耗时 ${(endTime - startTime).toFixed(0)}ms`
+      `[Scanner] native 扫描完成: ${nativeEntries.length} 个条目 -> ${deduplicatedApps.length} 个应用`
     )
 
-    return deduplicatedApps
+    return {
+      apps: deduplicatedApps,
+      complete: errors.length === 0,
+      errors
+    }
   } catch (error) {
-    console.error('[Scanner] 扫描应用失败:', error)
-    return []
+    console.error('[Scanner] native Windows 应用扫描失败:', error)
+    return { apps: [], complete: false, errors: [getErrorMessage(error)] }
   }
 }

@@ -1,6 +1,12 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import defaultAvatar from '../assets/image/default.png'
+import { normalizeSearchWallpaperConfig, type SearchWallpaperConfig } from '@shared/searchWallpaper'
+import {
+  resolveVisibleAiRequestStatus,
+  type AiRequestStatus,
+  type AiRequestStatusChange
+} from '@shared/aiRequestStatus'
 
 interface WindowInfo {
   title?: string
@@ -39,17 +45,14 @@ export type AutoClearOption = 'immediately' | '1m' | '2m' | '3m' | '5m' | '10m' 
 // 搜索框模式选项
 export type SearchMode = 'aggregate' | 'list'
 export type TabKeyFunction = 'navigate' | 'target-command'
-export type BuiltInShortcutKey = 'search' | 'closePlugin' | 'killPlugin'
+export type BuiltInShortcutKey = 'search' | 'closePlugin' | 'killPlugin' | 'esc'
 
-// 更新下载状态
-interface UpdateDownloadInfo {
-  hasDownloaded: boolean
+// 更新状态
+interface AvailableUpdateInfo {
+  hasUpdate: boolean
   version?: string
-  changelog?: string[]
+  changelog?: string
 }
-
-// AI 请求状态
-export type AiRequestStatus = 'idle' | 'sending' | 'receiving'
 
 export const useWindowStore = defineStore('window', () => {
   // 当前激活窗口信息
@@ -70,6 +73,8 @@ export const useWindowStore = defineStore('window', () => {
   const builtInSearchShortcutEnabled = ref(true)
   const builtInClosePluginShortcutEnabled = ref(true)
   const builtInKillPluginShortcutEnabled = ref(true)
+  const builtInEscShortcutEnabled = ref(true)
+  const hideMainWindowOnPluginEsc = ref(false)
 
   // 悬浮球双击目标指令
   const floatingBallDoubleClickCommand = ref('')
@@ -80,7 +85,10 @@ export const useWindowStore = defineStore('window', () => {
   const pluginLoading = ref(false)
 
   // AI 请求状态（用于显示 AI 调用动画）
-  const aiRequestStatus = ref<AiRequestStatus>('idle')
+  const aiRequestStatusesByPluginPath = ref<Record<string, AiRequestStatus>>({})
+  const aiRequestStatus = computed(() =>
+    resolveVisibleAiRequestStatus(aiRequestStatusesByPluginPath.value, currentPlugin.value?.path)
+  )
 
   // 子输入框配置 (插件模式下使用)
   const subInputPlaceholder = ref('搜索')
@@ -101,15 +109,31 @@ export const useWindowStore = defineStore('window', () => {
   const searchMode = ref<SearchMode>('aggregate')
 
   const theme = ref('system') // system, light, dark
-  const primaryColor = ref('blue') // blue, purple, green, orange, red, pink, custom
+  const primaryColor = ref('green') // blue, purple, green, orange, red, pink, custom
   const customColor = ref('#db2777') // 自定义颜色
+  const compactMainWindowHeader = ref(false) // 主窗口是否使用紧凑顶部栏
 
   // 亚克力材质背景色透明度（0-100）
   const acrylicLightOpacity = ref(78) // 明亮模式默认 78%
   const acrylicDarkOpacity = ref(50) // 暗黑模式默认 50%
 
-  // 更新下载状态
-  const updateDownloadInfo = ref<UpdateDownloadInfo>({ hasDownloaded: false })
+  // 主搜索窗口壁纸只在本地图片仍可访问时进入运行时状态
+  const searchWallpaper = ref<SearchWallpaperConfig | null>(null)
+  let searchWallpaperValidationId = 0
+
+  // 更新状态
+  const availableUpdateInfo = ref<AvailableUpdateInfo>({ hasUpdate: false })
+  const autoCheckUpdateEnabled = ref(true)
+  const dismissedUpdateVersion = ref<string | null>(null)
+  const shouldShowUpdateNotification = computed(() => {
+    const availableVersion = availableUpdateInfo.value.version ?? ''
+    return (
+      availableUpdateInfo.value.hasUpdate &&
+      autoCheckUpdateEnabled.value &&
+      !currentPlugin.value &&
+      availableVersion !== dismissedUpdateVersion.value
+    )
+  })
 
   // 更新窗口信息
   function updateWindowInfo(windowInfo: WindowInfo | null): void {
@@ -119,6 +143,15 @@ export const useWindowStore = defineStore('window', () => {
   // 更新 placeholder
   function updatePlaceholder(value: string): void {
     placeholder.value = value || DEFAULT_PLACEHOLDER
+  }
+
+  /**
+   * 更新主窗口顶部栏密度状态。
+   * @param enabled 是否启用紧凑顶部栏。
+   * @returns 无返回值。
+   */
+  function updateCompactMainWindowHeader(enabled: boolean): void {
+    compactMainWindowHeader.value = enabled === true
   }
 
   // 更新 avatar
@@ -232,7 +265,20 @@ export const useWindowStore = defineStore('window', () => {
       builtInClosePluginShortcutEnabled.value = value
       return
     }
-    builtInKillPluginShortcutEnabled.value = value
+    if (key === 'killPlugin') {
+      builtInKillPluginShortcutEnabled.value = value
+      return
+    }
+    builtInEscShortcutEnabled.value = value
+  }
+
+  /**
+   * 更新插件内按 ESC 时是否直接隐藏主窗口。
+   * @param enabled 是否直接隐藏主窗口。
+   * @returns 无返回值。
+   */
+  function updateHideMainWindowOnPluginEsc(enabled: boolean): void {
+    hideMainWindowOnPluginEsc.value = enabled === true
   }
 
   function updateFloatingBallDoubleClickCommand(value: string): void {
@@ -269,6 +315,60 @@ export const useWindowStore = defineStore('window', () => {
 
   function updateAcrylicDarkOpacity(value: number): void {
     acrylicDarkOpacity.value = value
+  }
+
+  /**
+   * 检查壁纸文件仍存在且能够被 Chromium 解码。
+   * @param wallpaper 已规范化的本地壁纸配置
+   * @returns 图片可用于渲染时返回 true
+   */
+  async function isSearchWallpaperAvailable(wallpaper: SearchWallpaperConfig): Promise<boolean> {
+    // 先通过主进程检查物理文件，避免对失效 file URL 发起无意义解码。
+    const [fileState] = await window.ztools.checkFilePaths([wallpaper.path])
+    if (!fileState?.exists || fileState.isDirectory) return false
+
+    // 再验证图片内容，损坏或不受支持的格式统一降级到主题背景。
+    return await new Promise<boolean>((resolve) => {
+      const image = new Image()
+      image.onload = (): void => resolve(true)
+      image.onerror = (): void => resolve(false)
+      image.src = wallpaper.url
+    })
+  }
+
+  /**
+   * 更新主搜索窗口壁纸，相同图片调整效果时跳过重复文件校验。
+   * @param value 从设置页或持久化存储接收的壁纸配置
+   * @returns 配置验证和应用完成后结束的 Promise
+   */
+  async function updateSearchWallpaper(value: unknown): Promise<void> {
+    const validationId = ++searchWallpaperValidationId
+    const normalizedWallpaper = normalizeSearchWallpaperConfig(value)
+    if (!normalizedWallpaper) {
+      searchWallpaper.value = null
+      return
+    }
+
+    // 滑块连续更新只改变显示参数，不重复读取同一张本地图片。
+    if (
+      searchWallpaper.value?.path === normalizedWallpaper.path &&
+      searchWallpaper.value.url === normalizedWallpaper.url
+    ) {
+      searchWallpaper.value = normalizedWallpaper
+      return
+    }
+
+    try {
+      const isAvailable = await isSearchWallpaperAvailable(normalizedWallpaper)
+
+      // 丢弃已经被后续选择替代的异步解码结果。
+      if (validationId !== searchWallpaperValidationId) return
+      searchWallpaper.value = isAvailable ? normalizedWallpaper : null
+    } catch (error) {
+      if (validationId !== searchWallpaperValidationId) return
+      console.warn('主搜索窗口壁纸不可用，已回退到主题背景:', error)
+      searchWallpaper.value = null
+    }
   }
 
   function applyCustomColor(color: string): void {
@@ -471,33 +571,72 @@ export const useWindowStore = defineStore('window', () => {
     return elapsedTime >= timeLimit
   }
 
-  // 更新下载状态
-  function setUpdateDownloadInfo(info: UpdateDownloadInfo): void {
-    updateDownloadInfo.value = info
+  // 设置可用更新信息
+  function setAvailableUpdateInfo(info: AvailableUpdateInfo): void {
+    availableUpdateInfo.value = info
   }
 
-  // 检查是否有已下载的更新
-  async function checkDownloadedUpdate(): Promise<void> {
+  /**
+   * 更新自动检查开关的运行时状态，并在重新开启时允许更新提示再次出现。
+   * @param enabled 是否启用自动检查更新
+   * @returns 无返回值
+   */
+  function updateAutoCheckUpdateEnabled(enabled: boolean): void {
+    autoCheckUpdateEnabled.value = enabled
+
+    // 用户主动重新开启自动检查时，清除本次运行的旧关闭记录。
+    if (enabled) dismissedUpdateVersion.value = null
+  }
+
+  /**
+   * 关闭当前版本的主窗口更新提示，关闭状态仅保留到本次应用退出。
+   * @returns 无返回值
+   */
+  function dismissUpdateNotification(): void {
+    dismissedUpdateVersion.value = availableUpdateInfo.value.version ?? ''
+  }
+
+  /**
+   * 在自动检查开启时恢复主进程中已检测到的更新状态。
+   * @returns 状态检查完成后结束的 Promise
+   */
+  async function checkUpdateStatus(): Promise<void> {
+    // 自动检查关闭时不恢复缓存提示，手动检查更新功能仍保持可用。
+    if (!autoCheckUpdateEnabled.value) return
+
     try {
       const status = await window.ztools.updater.getDownloadStatus()
-      if (status.hasDownloaded) {
-        updateDownloadInfo.value = {
-          hasDownloaded: true,
+      if (status.hasUpdate) {
+        availableUpdateInfo.value = {
+          hasUpdate: true,
           version: status.version,
           changelog: status.changelog
         }
       }
     } catch (error) {
-      console.error('检查下载状态失败:', error)
+      console.error('检查更新状态失败:', error)
     }
   }
 
-  // 更新 AI 请求状态
-  function setAiRequestStatus(status: AiRequestStatus): void {
-    aiRequestStatus.value = status
+  /**
+   * 更新指定插件的 AI 请求状态，idle 时释放已完成条目。
+   * @param change 主进程发送的插件级 AI 状态变化
+   * @returns 无返回值
+   */
+  function setAiRequestStatus(change: AiRequestStatusChange): void {
+    const nextStatuses = { ...aiRequestStatusesByPluginPath.value }
+    if (change.status === 'idle') {
+      delete nextStatuses[change.pluginPath]
+    } else {
+      nextStatuses[change.pluginPath] = change.status
+    }
+    aiRequestStatusesByPluginPath.value = nextStatuses
   }
 
-  // 从数据库加载设置
+  /**
+   * 从数据库加载主窗口设置，并应用缺失字段的默认值。
+   * @returns 设置加载和应用完成后结束的 Promise
+   */
   async function loadSettings(): Promise<void> {
     try {
       const data = await window.ztools.dbGet('settings-general')
@@ -517,17 +656,21 @@ export const useWindowStore = defineStore('window', () => {
         if (data.autoClear) {
           autoClear.value = data.autoClear
         }
+        if (data.autoCheckUpdate !== undefined) {
+          autoCheckUpdateEnabled.value = data.autoCheckUpdate
+        }
         if (data.theme) {
           theme.value = data.theme
         }
+        compactMainWindowHeader.value = data.compactMainWindowHeader === true
         if (data.customColor) {
           customColor.value = data.customColor
         }
         if (data.primaryColor) {
           updatePrimaryColor(data.primaryColor)
         } else {
-          // 默认蓝色
-          updatePrimaryColor('blue')
+          // 旧配置缺少主题色时使用当前产品默认的绿色。
+          updatePrimaryColor('green')
         }
         if (data.acrylicLightOpacity !== undefined) {
           acrylicLightOpacity.value = data.acrylicLightOpacity
@@ -535,6 +678,7 @@ export const useWindowStore = defineStore('window', () => {
         if (data.acrylicDarkOpacity !== undefined) {
           acrylicDarkOpacity.value = data.acrylicDarkOpacity
         }
+        await updateSearchWallpaper(data.searchWallpaper)
         if (data.showRecentInSearch !== undefined) {
           showRecentInSearch.value = data.showRecentInSearch
         }
@@ -569,10 +713,12 @@ export const useWindowStore = defineStore('window', () => {
           builtInSearchShortcutEnabled.value = config.search !== false
           builtInClosePluginShortcutEnabled.value = config.closePlugin !== false
           builtInKillPluginShortcutEnabled.value = config.killPlugin !== false
+          builtInEscShortcutEnabled.value = config.esc !== false
         }
+        hideMainWindowOnPluginEsc.value = data.hideMainWindowOnPluginEsc === true
       } else {
-        // 默认蓝色
-        updatePrimaryColor('blue')
+        // 首次启动没有通用设置时使用当前产品默认的绿色。
+        updatePrimaryColor('green')
       }
 
       // 监听系统主题变化，重新应用自定义颜色
@@ -602,11 +748,16 @@ export const useWindowStore = defineStore('window', () => {
     theme,
     primaryColor,
     customColor,
+    compactMainWindowHeader,
     acrylicLightOpacity,
     acrylicDarkOpacity,
-    updateDownloadInfo,
+    searchWallpaper,
+    availableUpdateInfo,
+    autoCheckUpdateEnabled,
+    shouldShowUpdateNotification,
     updateWindowInfo,
     updatePlaceholder,
+    updateCompactMainWindowHeader,
     updateAvatar,
     updateCurrentPlugin,
     setPluginLoading,
@@ -632,7 +783,10 @@ export const useWindowStore = defineStore('window', () => {
     builtInSearchShortcutEnabled,
     builtInClosePluginShortcutEnabled,
     builtInKillPluginShortcutEnabled,
+    builtInEscShortcutEnabled,
+    hideMainWindowOnPluginEsc,
     updateBuiltInShortcutEnabled,
+    updateHideMainWindowOnPluginEsc,
     floatingBallDoubleClickCommand,
     updateFloatingBallDoubleClickCommand,
     updateTheme,
@@ -640,11 +794,14 @@ export const useWindowStore = defineStore('window', () => {
     updateCustomColor,
     updateAcrylicLightOpacity,
     updateAcrylicDarkOpacity,
+    updateSearchWallpaper,
     getAutoPasteTimeLimit,
     getAutoClearTimeLimit,
     shouldClearSearch,
-    setUpdateDownloadInfo,
-    checkDownloadedUpdate,
+    setAvailableUpdateInfo,
+    updateAutoCheckUpdateEnabled,
+    dismissUpdateNotification,
+    checkUpdateStatus,
     loadSettings
   }
 })

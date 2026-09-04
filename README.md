@@ -4,400 +4,266 @@
 
 <img src="./.github/assets/icon.png" alt="ZTools Logo" width="120">
 
-**一个高性能、可扩展的应用启动器和插件平台**
+**A High-Performance, Extensible Application Launcher and Plugin Platform**
 
-_uTools 的开源实现 | 支持 macOS 和 Windows_
+_Open Source Implementation of uTools | Supports macOS and Windows_
 
 [![GitHub release](https://img.shields.io/github/v/release/lzx8589561/ZTools)](https://github.com/ZToolsCenter/ZTools/releases)
 [![License](https://img.shields.io/github/license/lzx8589561/ZTools)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-blue)](https://github.com/ZToolsCenter/ZTools)
 
-[English](./README_EN.md) | 简体中文
+English | [简体中文](./README_CN.md)
 
 </div>
+
+## ❤️ Sponsors
+
+> [Want to appear here?](mailto:8589561@qq.com)
+
+<details open>
+<summary>Click to collapse</summary>
+
+<table>
+  <tr>
+    <td width="240" align="center">
+      <a href="https://go.apimart.ai/gh-ztools">
+        <img src="./.github/assets/sponsors/apimart.png" alt="APIMart" width="220">
+      </a>
+    </td>
+    <td>
+      Thanks to <a href="https://go.apimart.ai/gh-ztools">APIMart</a> for sponsoring this project! APIMart is a low-cost API platform for AI image &amp; video generation — GPT-Image-2 from $0.006/image, 160+ images per dollar. One async API covers both image and video: submit a task, get an ID, fetch results via polling or callback. Batch tens of thousands of images without timeouts, switch models without changing code. Pay-as-you-go with no monthly fee — <a href="https://go.apimart.ai/gh-ztools">sign up here</a> to get started.
+    </td>
+  </tr>
+</table>
+
+</details>
 
 ---
 
-## ✨ 特性
+## ✨ Features
 
-- 🚀 **快速启动** - 拼音搜索、正则匹配、历史记录、固定应用
-- 🧩 **插件系统** - 支持 UI 插件和无界面插件，完整的 API 支持
-- 📋 **剪贴板管理** - 历史记录、搜索、图片支持、跨平台原生实现
-- 🎨 **主题定制** - 系统/亮色/暗色模式，6 种主题色可选
-- ⚡ **高性能** - LMDB 数据库、WebContentsView 架构、极速响应
-- 🌍 **跨平台** - 原生支持 macOS 和 Windows，统一体验
-- 🔒 **数据隔离** - 插件数据独立存储，安全可靠
-- 🛠️ **开发友好** - 完整的 TypeScript 类型支持，热重载开发
-- ⚙️ **最新技术栈** - Electron 41 + Node 24.15 + Chrome 146
+- 🚀 **Quick Launch** - Pinyin search, regex matching, history tracking, pinned apps
+- 🧩 **Plugin System** - Support for UI plugins and headless plugins with complete API support
+- 📋 **Clipboard Management** - History tracking, search, image support, cross-platform native implementation
+- 🎨 **Theme Customization** - System/light/dark mode with 6 theme colors to choose from
+- ⚡ **High Performance** - LMDB database, WebContentsView architecture, ultra-fast response
+- 🌍 **Cross-Platform** - Native support for macOS and Windows with unified experience
+- 🔒 **Data Isolation** - Independent plugin data storage, secure and reliable
+- 🛠️ **Developer Friendly** - Complete TypeScript type support, hot reload development
+- ⚙️ **Modern Tech Stack** - Electron 41 + Node 24.15 + Chrome 146
 
-## 📸 预览
+## 📸 Preview
 
 <div align="center">
-  <img src="./.github/assets/demo.gif" alt="ZTools 演示" width="600">
-  <p><i>快速启动应用和搜索功能演示</i></p>
+  <img src="./.github/assets/demo.gif" alt="ZTools Demo" width="600">
+  <p><i>Quick launch and search functionality demo</i></p>
 </div>
 
-### 界面展示
+### Interface Showcase
 
 <div align="center">
   <table>
     <tr>
       <td width="50%">
-        <img src="./.github/assets/main-light.png" alt="主界面 - 亮色主题">
-        <p align="center"><i>主界面 - 亮色主题</i></p>
+        <img src="./.github/assets/main-light.png" alt="Main Interface - Light Theme">
+        <p align="center"><i>Main Interface - Light Theme</i></p>
       </td>
       <td width="50%">
-        <img src="./.github/assets/main-dark.png" alt="主界面 - 暗色主题">
-        <p align="center"><i>主界面 - 暗色主题</i></p>
+        <img src="./.github/assets/main-dark.png" alt="Main Interface - Dark Theme">
+        <p align="center"><i>Main Interface - Dark Theme</i></p>
       </td>
     </tr>
     <tr>
       <td width="50%">
-        <img src="./.github/assets/settings.png" alt="设置界面">
-        <p align="center"><i>设置界面 - 主题定制和通用设置</i></p>
+        <img src="./.github/assets/settings.png" alt="Settings">
+        <p align="center"><i>Settings - Theme Customization and General Settings</i></p>
       </td>
       <td width="50%">
-        <img src="./.github/assets/plugin-market.png" alt="插件市场">
-        <p align="center"><i>插件市场 - 在线安装和管理插件</i></p>
+        <img src="./.github/assets/plugin-market.png" alt="Plugin Market">
+        <p align="center"><i>Plugin Market - Online Installation and Management</i></p>
       </td>
     </tr>
   </table>
 </div>
 
-## 🚀 快速开始
+## 🚀 Quick Start
 
-### 安装
+### Installation
 
-#### 方式 1：下载预编译版本（推荐）
+#### Method 1: Download Pre-built Version (Recommended)
 
-从 [Releases](https://github.com/ZToolsCenter/ZTools/releases) 页面下载最新版本：
+Download the latest version from [Releases](https://github.com/ZToolsCenter/ZTools/releases):
 
-- **macOS**: `ztools-x.x.x.dmg` 或 `ZTools-x.x.x-arm64-mac.zip`
-- **Windows**: `ztools-x.x.x-setup.exe` 或 `ztools-x.x.x-win.zip`
+- **macOS**: `ztools-x.x.x.dmg` or `ZTools-x.x.x-arm64-mac.zip`
+- **Windows**: `ztools-x.x.x-setup.exe` or `ztools-x.x.x-win.zip`
 
-#### 方式 2：从源码构建
+#### Method 2: Build from Source
 
 ```bash
-# 克隆仓库
+# Clone the repository
 git clone https://github.com/ZToolsCenter/ZTools.git
 cd ZTools
 
-# 安装依赖
+# Install dependencies
 pnpm install
 
-# 开发模式
+# Development mode
 pnpm dev
 
-# 构建
+# Build
 pnpm build:mac    # macOS
 pnpm build:win    # Windows
-pnpm build:linux  # Linux (当前主机架构)
-pnpm build:linux:x64 # Linux (按 amd64/x64 架构打包)
-pnpm build:linux:arm64 # Linux (按 arm64 架构打包)
+pnpm build:linux  # Linux (Default Arch)
+pnpm build:linux:x64 # Linux (amd64/x64)
+pnpm build:linux:arm64 # Linux (arm64)
 ```
 
-### 使用
+### Usage
 
-1. 启动应用后，使用快捷键 `Option+Z`（macOS）或 `Alt+Z`（Windows）唤起主界面
-2. 输入应用名称或命令进行搜索
-3. 按 `↑` `↓` `←` `→` 选择，`Enter` 确认，`Esc` 退出
+1. After launching the app, use the shortcut `Option+Z` (macOS) or `Alt+Z` (Windows) to open the main interface
+2. Enter application name or command to search
+3. Use `↑` `↓` `←` `→` to navigate, `Enter` to confirm, `Esc` to exit
 
-### 插件市场
+## 🧩 Plugin Development
 
-ZTools 提供内置的插件市场，可以方便地浏览和安装插件：
+ZTools is a powerful and extensible plugin platform that enhances your productivity with custom plugins. With simple configuration, rich APIs, and cross-platform support, you can easily develop powerful plugins.
 
-**主要功能**：
+**Plugin System Features**:
 
-- 📦 **在线安装** - 一键下载安装插件
-- 🔄 **插件升级** - 检测插件更新，一键升级到最新版本
-- 🔍 **插件详情** - 查看插件描述、版本、作者等详细信息
-- ✅ **已装管理** - 已安装插件可直接打开或升级
+- 📝 **Simple Configuration** - Easily define plugins through standard `plugin.json` files, no complex setup required
+- 🔌 **Rich APIs** - Access system capabilities through the global `ztools` object, including notifications, simulated input, and persistent storage
+- 🎯 **Flexible Commands** - Trigger your plugins using text, regex, or global hooks to adapt to any workflow
+- 🌍 **Cross-Platform** - Build once, run on Windows, macOS, and Linux with a consistent experience across all devices
 
-**使用方法**：
+> 📖 **Full Documentation**: Visit [ZTools Developer Documentation](https://ztoolscenter.github.io/ZTools-doc/) for more details
 
-1. 打开 ZTools 设置（点击头像）
-2. 切换到"插件市场"标签
-3. 浏览并安装感兴趣的插件
-4. 已安装插件会显示"打开"或"升级"按钮
+## 🛠️ Tech Stack
 
-**技术实现**：
+- **Framework**: Electron 41 + Vue 3 + TypeScript
+- **Build**: Vite + electron-vite
+- **Database**: LMDB (high-performance key-value storage)
+- **State Management**: Pinia
+- **Search Engine**: Fuse.js (with Pinyin support)
+- **Native Modules**: C++ (Node-API)
+  - Clipboard monitoring
+  - Window management
+  - Region screenshot (Windows)
 
-- 插件托管在 GitHub Releases（[ZTools-plugins](https://github.com/ZToolsCenter/ZTools-plugins/releases)）
-- 插件列表：从 `plugins.json` 文件获取插件信息和下载链接
-- 插件包格式：ZIP 压缩包，包含 `plugin.json` 和插件文件
-- 版本比较：自动对比本地版本和市场版本（语义化版本号）
-- 升级策略：先卸载旧版本，再安装新版本
-
-### 应用内更新
-
-ZTools 支持应用内一键更新，无需手动下载安装包：
-
-**更新流程**：
-
-1. 应用自动检查更新（启动时或手动检查）
-2. 发现新版本时显示更新提示
-3. 点击更新按钮开始下载更新包
-4. 下载完成后自动安装并重启应用
-
-**技术实现**：
-
-- 更新源：GitHub Releases（[ZTools](https://github.com/ZToolsCenter/ZTools/releases)）
-- 更新信息文件：`latest.yml`（包含版本号、更新日志等）
-- 更新包格式：ZIP 压缩包，命名格式为 `update-{platform}-{arch}-{version}.zip`
-  - 示例：`update-darwin-arm64-1.2.8.zip`（macOS Apple Silicon）
-  - 示例：`update-win32-x64-1.2.8.zip`（Windows x64）
-- 更新程序：独立的 `ztools-updater` 可执行文件
-  - macOS: `ztools-updater`（位于 Contents/MacOS/）
-  - Windows: `ztools-agent.exe`（位于应用根目录）
-- 更新流程：
-  1. 从 GitHub Releases 下载 `latest.yml` 获取最新版本信息
-  2. 下载对应平台的更新包
-  3. 解压并启动独立的 updater 程序
-  4. 应用退出
-  5. updater 替换 `app.asar` 文件
-  6. 自动重启应用
-
-**平台支持**：
-
-- ✅ macOS (Apple Silicon)
-- ✅ Windows (x64)
-
-## 🧩 插件开发
-
-ZTools 是一个强大、可扩展的插件平台，使用自定义插件提升您的生产力。通过简单的配置、丰富的 API 以及跨平台支持，您可以轻松开发出功能强大的插件。
-
-**插件系统特点**：
-
-- 📝 **简单配置** - 通过标准的 `plugin.json` 文件轻松定义插件，无需复杂的设置
-- 🔌 **丰富的 API** - 通过全局 `ztools` 对象访问系统能力，包括通知、模拟输入和持久化存储
-- 🎯 **灵活的指令** - 使用文本、正则或全局钩子触发您的插件，以适应任何工作流
-- 🌍 **跨平台** - 一次构建，在 Windows、macOS 和 Linux 上运行，在所有设备上获得一致的体验
-
-> 📖 **完整文档**：查看 [ZTools 开发者文档](https://ztoolscenter.github.io/ZTools-doc/) 了解更多详情
-
-ZTools 提供完整的插件系统，支持两种类型：
-
-### UI 插件
-
-```json
-// plugin.json
-{
-  "name": "my-plugin",
-  "version": "1.0.0",
-  "description": "我的插件",
-  "main": "index.html",
-  "logo": "logo.png",
-  "features": [
-    {
-      "code": "search",
-      "explain": "搜索功能",
-      "cmds": ["搜索"]
-    }
-  ]
-}
-```
-
-### 无界面插件
-
-无界面插件适合后台任务、数据处理等不需要 UI 的场景。
-
-```json
-// plugin.json（注意：没有 main 字段）
-{
-  "name": "my-headless-plugin",
-  "version": "1.0.0",
-  "description": "后台处理插件",
-  "logo": "logo.png",
-  "features": [
-    {
-      "code": "process",
-      "explain": "后台处理",
-      "cmds": ["处理"]
-    }
-  ]
-}
-```
-
-```javascript
-// preload.js
-window.exports = {
-  process: {
-    mode: 'none', // 无界面插件标识
-    args: {
-      enter: async (action) => {
-        // 处理逻辑
-        window.ztools.showNotification('执行完成')
-        return { success: true }
-      }
-    }
-  }
-}
-```
-
-### 插件 API
-
-ZTools 提供丰富的 API：
-
-- **数据库 API** - 持久化数据存储
-- **剪贴板 API** - 访问和监听剪贴板
-- **UI API** - 控制窗口和界面
-- **对话框 API** - 显示对话框和文件选择器
-- **Shell API** - 执行命令行命令
-- **窗口管理 API** - 创建独立窗口
-
-详细文档请查看 [CLAUDE.md](./CLAUDE.md)
-
-## 🛠️ 技术栈
-
-- **框架**: Electron 41 + Vue 3 + TypeScript
-- **构建**: Vite + electron-vite
-- **数据库**: LMDB（高性能键值存储）
-- **状态管理**: Pinia
-- **搜索引擎**: Fuse.js（拼音支持）
-- **原生模块**: C++ (Node-API)
-  - 剪贴板监听
-  - 窗口管理
-  - 区域截图（Windows）
-
-## 📁 项目结构
+## 📁 Project Structure
 
 ```
 ztools/
 ├── src/
-│   ├── main/              # 主进程
-│   │   ├── api/          # IPC API 模块
-│   │   ├── core/         # 核心功能（数据库、原生模块）
+│   ├── main/              # Main process
+│   │   ├── api/          # IPC API modules
+│   │   ├── core/         # Core functionality (database, native modules)
 │   │   ├── windowManager.ts
 │   │   └── pluginManager.ts
-│   ├── preload/          # Preload 脚本
-│   └── renderer/         # 渲染进程（Vue）
+│   ├── preload/          # Preload scripts
+│   └── renderer/         # Renderer process (Vue)
 │       ├── components/
-│       ├── stores/       # Pinia 状态管理
+│       ├── stores/       # Pinia state management
 │       └── App.vue
-├── resources/            # 资源文件
-│   ├── lib/             # 原生模块（.node）
-│   └── preload.js       # 插件 Preload
-└── CLAUDE.md            # 完整技术文档
+├── resources/            # Resource files
+│   ├── lib/             # Native modules (.node)
+│   └── preload.js       # Plugin preload
+└── CLAUDE.md            # Complete technical documentation
 ```
 
-## 📚 文档
+## 📚 Documentation
 
-- [CLAUDE.md](./CLAUDE.md) - 完整技术文档和架构说明
-- [开发命令](#开发命令) - 常用命令说明
-- [插件开发](#插件开发) - 插件开发指南
+- [CLAUDE.md](./CLAUDE.md) - Complete technical documentation and architecture description
+- [Development Commands](#development-commands) - Common command reference
+- [Plugin Development](#plugin-development) - Plugin development guide
 
-## 💻 开发
+## 💻 Development
 
-### 环境要求
+### Requirements
 
 - Node.js >= 18
 - npm >= 9
-- macOS 或 Windows 开发环境
+- macOS or Windows development environment
 
-### 代码拉取
-
-1. 先 fork 仓库
-
-- 如果需要贡献代码请 fork [ztools-api-types](https://github.com/ZToolsCenter/ztools-api-types) 和 [ztools-plugin-cli](https://github.com/ZToolsCenter/ztools-plugin-cli) 仓库
-
-2. 拉取完整代码
+### Development Commands
 
 ```bash
-git clone https://github.com/ZToolsCenter/ZTools.git --recurse-submodules
-```
-
-### 开发命令
-
-```bash
-# 安装依赖
+# Install dependencies
 pnpm install
 
-# 开发模式（热重载）
+# Development mode (hot reload)
 pnpm dev
 
-# 类型检查
-pnpm typecheck          # 全部
-pnpm typecheck:node     # 主进程 + preload
-pnpm typecheck:web      # 渲染进程
+# Type checking
+pnpm typecheck          # All
+pnpm typecheck:node     # Main process + preload
+pnpm typecheck:web      # Renderer process
 
-# 代码格式化
-pnpm format             # Prettier 格式化
-pnpm lint               # ESLint 检查
+# Code formatting
+pnpm format             # Prettier formatting
+pnpm lint               # ESLint check
 
-# 构建
-pnpm build              # 仅编译源码
-pnpm build:mac          # 打包 macOS 应用
-pnpm build:win          # 打包 Windows 应用
-pnpm build:linux        # 打包 Linux 应用 (当前主机架构)
-pnpm build:linux:x64    # 打包 Linux 应用 (amd64/x64)
-pnpm build:linux:arm64  # 打包 Linux 应用 (arm64)
-pnpm build:unpack       # 打包但不生成安装包（调试用）
+# Build
+pnpm build              # Compile source code only
+pnpm build:mac          # Package macOS app
+pnpm build:win          # Package Windows app
+pnpm build:linux        # Package Linux app (Default Arch)
+pnpm build:linux:x64    # Package Linux app (amd64/x64)
+pnpm build:linux:arm64  # Package Linux app (arm64)
+pnpm build:unpack       # Package without installer (for debugging)
 ```
 
-### 调试
+### Debugging
 
-- 主进程：在 VS Code 中按 F5，或使用 `pnpm dev` 查看终端日志
-- 渲染进程：在应用中按 `Cmd+Option+I`（macOS）或 `Ctrl+Shift+I`（Windows）打开开发者工具
-- 插件：在插件页面点击"打开开发者工具"按钮
+- Main process: Press F5 in VS Code, or use `pnpm dev` to view terminal logs
+- Renderer process: Press `Cmd+Option+I` (macOS) or `Ctrl+Shift+I` (Windows) to open developer tools
+- Plugins: Click "Open DevTools" button on the plugin page
 
-## 🗺️ 路线图
+## 🗺️ Roadmap
 
-### 已完成 ✅
+### Completed ✅
 
-- [x] 应用快速启动和搜索
-- [x] 插件系统（UI + 无界面）
-- [x] 剪贴板历史管理
-- [x] 跨平台支持（macOS + Windows）
-- [x] LMDB 数据库迁移
-- [x] 主题定制
-- [x] 数据隔离
-- [x] 插件市场
-- [x] 全局快捷键自定义
-- [x] 插件分离为独立窗口
-- [ ] 插件自动更新
-- [ ] 云同步（可选）
-- [ ] Linux 支持
-- [ ] MCP工具集
+- [x] Quick app launch and search
+- [x] Plugin system (UI + headless)
+- [x] Clipboard history management
+- [x] Cross-platform support (macOS + Windows)
+- [x] LMDB database migration
+- [x] Theme customization
+- [x] Data isolation
+- [x] Plugin market
+- [x] Custom global shortcuts
+- [x] Separate plugins into independent windows
+- [ ] Plugin auto-update
+- [ ] Cloud sync (optional)
+- [ ] Linux support
+- [ ] MCP toolkit
 
-## 🐛 问题反馈
+## 🐛 Issue Reporting
 
-遇到问题？请在 [Issues](https://github.com/ZToolsCenter/ZTools/issues) 中反馈。
+Having issues? Please report them in [Issues](https://github.com/ZToolsCenter/ZTools/issues).
 
-提交 Issue 时请包含：
+When submitting an issue, please include:
 
-- 操作系统版本
-- ZTools 版本
-- 复现步骤
-- 错误日志（如有）
+- Operating system version
+- ZTools version
+- Steps to reproduce
+- Error logs (if any)
 
-## 📄 许可证
+## 📄 License
 
-本项目采用 [MIT License](./LICENSE) 许可证。
+This project is licensed under the [MIT License](./LICENSE).
 
-## 💖 赞助支持
+## 💝 Acknowledgments
 
-如果 ZTools 对你有帮助，欢迎通过爱发电赞助支持项目的持续开发：
-
-<a href="https://afdian.com/a/ZTools">
-  <img src="https://img.shields.io/badge/爱发电-赞助支持-946ce6?style=for-the-badge" alt="爱发电">
-</a>
-
-## 💝 致谢
-
-- [uTools](https://u.tools/) - 灵感来源
-- [Electron](https://www.electronjs.org/) - 跨平台桌面应用框架
-- [Vue.js](https://vuejs.org/) - 渐进式 JavaScript 框架
-- [LMDB](http://www.lmdb.tech/) - 高性能嵌入式数据库
-
-## ⭐ Star 历史
-
-[![Star History Chart](https://api.star-history.com/svg?repos=lzx8589561/ZTools&type=Date)](https://star-history.com/#lzx8589561/ZTools&Date)
+- [uTools](https://u.tools/) - Source of inspiration
+- [Electron](https://www.electronjs.org/) - Cross-platform desktop app framework
+- [Vue.js](https://vuejs.org/) - Progressive JavaScript framework
+- [LMDB](http://www.lmdb.tech/) - High-performance embedded database
 
 ---
 
 <div align="center">
 
-**如果这个项目对你有帮助，请给个 Star ⭐️**
+**If this project helps you, please give it a Star ⭐️**
 
 Made with ❤️ by [lzx8589561](https://github.com/lzx8589561)
 

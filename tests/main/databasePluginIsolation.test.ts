@@ -15,6 +15,8 @@ const mockLmdb = vi.hoisted(() => ({
   allDocs: vi.fn(),
   get: vi.fn(),
   remove: vi.fn(),
+  removeAndResolve: vi.fn(),
+  removeAttachmentSilent: vi.fn(),
   getAttachmentDb: vi.fn(() => mockAttachmentDb),
   getMetaDb: vi.fn(() => mockMetaDb)
 }))
@@ -40,6 +42,8 @@ vi.mock('../../src/main/core/pluginWindowManager', () => ({
 }))
 
 import { DatabaseAPI } from '../../src/main/api/shared/database'
+import { getPluginDataPath } from '../../src/main/core/appData/appDataPaths'
+import { physicalFs } from '../../src/main/utils/physicalFs'
 
 describe('database plugin isolation', () => {
   beforeEach(() => {
@@ -49,6 +53,7 @@ describe('database plugin isolation', () => {
     mockLmdb.allDocs.mockReturnValue([])
     mockLmdb.get.mockReturnValue(null)
     mockLmdb.remove.mockReturnValue({ ok: true })
+    mockLmdb.removeAndResolve.mockReturnValue({ ok: true })
     mockAttachmentDb.getRange.mockReturnValue([])
     mockAttachmentDb.get.mockReturnValue(null)
     mockMetaDb.getRange.mockReturnValue([])
@@ -185,14 +190,40 @@ describe('database plugin isolation', () => {
     const result = await database.clearPluginData('demo__dev')
 
     expect(mockLmdb.allDocs).toHaveBeenCalledWith('PLUGIN/demo__dev/')
-    expect(mockLmdb.remove).toHaveBeenCalledWith('PLUGIN/demo__dev/settings')
-    expect(mockMetaDb.removeSync).toHaveBeenCalledWith('PLUGIN/demo__dev/settings')
-    expect(mockAttachmentDb.removeSync).toHaveBeenCalledWith('attachment:PLUGIN/demo__dev/logo')
-    expect(mockAttachmentDb.removeSync).toHaveBeenCalledWith('attachment-ext:PLUGIN/demo__dev/logo')
+    expect(mockLmdb.removeAndResolve).toHaveBeenCalledWith('PLUGIN/demo__dev/settings')
+    expect(mockMetaDb.removeSync).not.toHaveBeenCalled()
+    expect(mockLmdb.removeAttachmentSilent).toHaveBeenCalledWith('PLUGIN/demo__dev/logo')
     expect(result).toEqual({
       success: true,
       deletedCount: 2
     })
+  })
+
+  it('clears the plugin filesystem data directory alongside the database namespace', async () => {
+    const fsRm = vi.spyOn(physicalFs.promises, 'rm').mockResolvedValue(undefined as any)
+    mockLmdb.allDocs.mockReturnValue([])
+
+    const database = new DatabaseAPI()
+    const result = await database.clearPluginData('demo')
+
+    expect(result).toEqual({ success: true, deletedCount: 0 })
+    // 「清除数据」同时删除 ztools.getPath('pluginData') 指向的目录，与卸载清理语义一致
+    expect(fsRm).toHaveBeenCalledWith(getPluginDataPath('demo'), {
+      recursive: true,
+      force: true
+    })
+    fsRm.mockRestore()
+  })
+
+  it('does not delete the filesystem data directory when clearing host data', async () => {
+    const fsRm = vi.spyOn(physicalFs.promises, 'rm').mockResolvedValue(undefined as any)
+
+    const database = new DatabaseAPI()
+    const result = await database.clearPluginData('ZTOOLS')
+
+    expect(result).toEqual({ success: false, error: '主程序数据不支持通过该接口清空' })
+    expect(fsRm).not.toHaveBeenCalled()
+    fsRm.mockRestore()
   })
 
   it('derives plugin prefix from child window session partition when webContents is not a main view', () => {

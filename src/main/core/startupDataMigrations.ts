@@ -1,8 +1,28 @@
 import databaseAPI from '../api/shared/database.js'
 import { isDevelopmentPluginName, toDevPluginName } from '../../shared/pluginRuntimeNamespace.js'
 import { isBundledInternalPlugin } from './internalPlugins.js'
+import { HOST_STORAGE_KEYS, LEGACY_CAMEL_CASE_STORAGE_KEYS } from '../../shared/storageKeys.js'
+import { getZToolsDataLayout, type AppDataPathOptions } from './appData/appDataPaths.js'
+import { rewriteLegacyStoragePaths } from './storage/legacyPathRewriter.js'
+import aiProviderService from './aiProviderService.js'
 
 const LEGACY_WEB_SEARCH_FEATURE_PREFIX = 'web-search-'
+const LEGACY_PATH_STORAGE_KEYS = [
+  HOST_STORAGE_KEYS.settingsGeneral,
+  HOST_STORAGE_KEYS.plugins,
+  HOST_STORAGE_KEYS.disabledPlugins,
+  HOST_STORAGE_KEYS.pinnedCommands,
+  HOST_STORAGE_KEYS.superPanelPinned,
+  HOST_STORAGE_KEYS.localShortcuts,
+  HOST_STORAGE_KEYS.globalShortcuts,
+  HOST_STORAGE_KEYS.appShortcuts,
+  HOST_STORAGE_KEYS.commandAliases,
+  HOST_STORAGE_KEYS.pluginCenterPinned,
+  HOST_STORAGE_KEYS.commandHistory,
+  HOST_STORAGE_KEYS.lastMatchState,
+  HOST_STORAGE_KEYS.devPluginRegistry,
+  'cached-commands'
+] as const
 
 /**
  * 将单个旧版 macOS .icns 图标 URL 迁移为直接使用 .app 路径的 ztools-icon URL
@@ -53,12 +73,15 @@ function migrateLegacyMacAppIcons(items: any[]): boolean {
 }
 
 /**
- * 启动时统一迁移历史遗留数据
- * 当前仅处理旧版 macOS .icns 图标 URL 到 .app 路径图标 URL 的转换
+ * 启动时统一迁移历史文件 URL、存储键和失效的功能引用。
+ * @returns 无返回值
  */
 export function runStartupDataMigrations(): void {
+  // 先升级 AI 配置，保证后续设置页和插件调用只读取统一的供应商结构。
+  aiProviderService.migrateLegacyData()
+  migrateLegacyFileUrls()
+  migrateHostStorageKeys()
   migrateDevPluginNames()
-  migrateVariantRefLists()
   cleanupLegacyWebSearchReferences()
 
   if (process.platform !== 'darwin') return
@@ -84,6 +107,93 @@ export function runStartupDataMigrations(): void {
       console.error(`[StartupMigration] 迁移失败: ${key}`, error)
     }
   }
+}
+
+/**
+ * 修复已经完成 2.x 迁移但仍指向旧 userData 的文件 URL。
+ * @param pathOptions 测试或特殊运行环境使用的数据目录覆盖项
+ * @returns 无返回值
+ */
+export function migrateLegacyFileUrls(pathOptions: AppDataPathOptions = {}): void {
+  const layout = getZToolsDataLayout(pathOptions)
+
+  // 只扫描可能持有文件或图标路径的主程序文档，避免无关数据产生写放大。
+  for (const key of LEGACY_PATH_STORAGE_KEYS) {
+    try {
+      const data = databaseAPI.dbGet(key)
+      if (data === null || data === undefined) continue
+
+      const result = rewriteLegacyStoragePaths(data, layout)
+      if (!result.changed) continue
+
+      databaseAPI.dbPut(key, result.value)
+      console.log(`[StartupMigration] 已修复旧版文件 URL: ${key}`)
+    } catch (error) {
+      // 单个文档失败不能阻止其余迁移和主程序启动。
+      console.error(`[StartupMigration] 修复旧版文件 URL 失败: ${key}`, error)
+    }
+  }
+}
+
+export function migrateHostStorageKeys(): void {
+  const simpleMappings = [
+    [LEGACY_CAMEL_CASE_STORAGE_KEYS.autoStartPlugin, HOST_STORAGE_KEYS.autoStartPlugin],
+    [LEGACY_CAMEL_CASE_STORAGE_KEYS.autoDetachPlugin, HOST_STORAGE_KEYS.autoDetachPlugin],
+    [LEGACY_CAMEL_CASE_STORAGE_KEYS.outKillPlugin, HOST_STORAGE_KEYS.outKillPlugin],
+    [LEGACY_CAMEL_CASE_STORAGE_KEYS.detachedWindowSizes, HOST_STORAGE_KEYS.detachedWindowSizes]
+  ] as const
+
+  for (const [legacyKey, targetKey] of simpleMappings) {
+    const legacyValue = databaseAPI.dbGet(legacyKey)
+    if (legacyValue === null || legacyValue === undefined) continue
+
+    const targetValue = databaseAPI.dbGet(targetKey)
+    databaseAPI.dbPut(targetKey, mergeStorageValues(legacyValue, targetValue))
+    databaseAPI.dbRemove(legacyKey)
+    console.log(`[StartupMigration] 已迁移存储键: ${legacyKey} -> ${targetKey}`)
+  }
+
+  const legacyDisabled = databaseAPI.dbGet(LEGACY_CAMEL_CASE_STORAGE_KEYS.disabledMainPushPlugin)
+  if (legacyDisabled !== null && legacyDisabled !== undefined) {
+    const existingEnabled = databaseAPI.dbGet(HOST_STORAGE_KEYS.enabledMainPushPlugin)
+    if (existingEnabled === null || existingEnabled === undefined) {
+      const disabledNames = normalizePluginNameList(legacyDisabled)
+      const installedPlugins = databaseAPI.dbGet(HOST_STORAGE_KEYS.plugins)
+      const enabledNames = Array.isArray(installedPlugins)
+        ? installedPlugins
+            .map((plugin: any) => (typeof plugin?.name === 'string' ? plugin.name : ''))
+            .filter((name: string) => name && !disabledNames.includes(name))
+        : []
+      databaseAPI.dbPut(HOST_STORAGE_KEYS.enabledMainPushPlugin, enabledNames)
+    }
+    databaseAPI.dbRemove(LEGACY_CAMEL_CASE_STORAGE_KEYS.disabledMainPushPlugin)
+    console.log('[StartupMigration] 已迁移 mainPush 插件启用配置')
+  }
+}
+
+function mergeStorageValues(legacyValue: any, targetValue: any): any {
+  if (targetValue === null || targetValue === undefined) return legacyValue
+  if (Array.isArray(legacyValue) && Array.isArray(targetValue)) {
+    return Array.from(new Set([...targetValue, ...legacyValue]))
+  }
+  if (
+    legacyValue &&
+    targetValue &&
+    typeof legacyValue === 'object' &&
+    typeof targetValue === 'object'
+  ) {
+    return { ...legacyValue, ...targetValue }
+  }
+  return targetValue
+}
+
+function normalizePluginNameList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item: any) =>
+      typeof item === 'string' ? item : typeof item?.pluginName === 'string' ? item.pluginName : ''
+    )
+    .filter(Boolean)
 }
 
 /**
@@ -137,12 +247,6 @@ function migrateDevPluginNames(): void {
   }
 }
 
-/**
- * 将 autoStartPlugin / outKillPlugin / autoDetachPlugin 中旧式对象格式迁移为新式字符串格式。
- *
- * 旧格式：[{ pluginName: 'demo', source: 'development' }, {pluginName: 'foo', source: 'installed'}, ...]
- * 新格式：['demo__dev', 'foo', ...]
- */
 function isLegacyWebSearchCommand(item: any): boolean {
   return (
     item &&
@@ -235,40 +339,5 @@ export function cleanupLegacyWebSearchReferences(): void {
     console.log('[StartupMigration] 已清理旧网页快开引用: super-panel-pinned')
   } catch (error) {
     console.error('[StartupMigration] 清理旧网页快开引用失败: super-panel-pinned', error)
-  }
-}
-
-function migrateVariantRefLists(): void {
-  const configKeys = ['autoStartPlugin', 'outKillPlugin', 'autoDetachPlugin']
-
-  for (const key of configKeys) {
-    try {
-      const data: any[] = databaseAPI.dbGet(key) || []
-      if (!Array.isArray(data)) continue
-
-      let changed = false
-      const migrated: string[] = data
-        .map((item) => {
-          if (typeof item === 'string') return item
-          if (item && typeof item === 'object' && typeof item.pluginName === 'string') {
-            changed = true
-            const isDev = item.source === 'development' || item.pluginSource === 'development'
-            // 内置插件不加 __dev 后缀
-            if (isDev && !isBundledInternalPlugin(item.pluginName)) {
-              return toDevPluginName(item.pluginName)
-            }
-            return item.pluginName
-          }
-          return null
-        })
-        .filter(Boolean) as string[]
-
-      if (changed || migrated.length !== data.length) {
-        databaseAPI.dbPut(key, migrated)
-        console.log(`[StartupMigration] 已迁移插件配置列表: ${key}`)
-      }
-    } catch (error) {
-      console.error(`[StartupMigration] 迁移插件配置列表失败: ${key}`, error)
-    }
   }
 }

@@ -5,6 +5,7 @@ import type { PluginUninstallOptions } from '@/components'
 import { PluginDetail, NpmInstallPanel } from './components'
 import { compareVersions, upgradeInstalledPluginFromMarket, weightedSearch } from '@/utils'
 import { useJumpFunction, useZtoolsSubInput } from '@/composables'
+import { jumpFunctionPluginMarketSetting } from '@/views/PluginMarketSetting/PluginMarketSetting'
 import { useRouter } from 'vue-router'
 
 // const emit = defineEmits<{
@@ -24,6 +25,7 @@ const isDeleting = ref(false)
 const isKilling = ref(false)
 const isKillingAll = ref(false)
 const isExportingAll = ref(false)
+const isCheckingMarketUpdates = ref(false)
 // 是否正在执行“全部更新”
 const isUpgradingAll = ref(false)
 // “全部更新”当前完成数（用于进度展示）
@@ -41,7 +43,7 @@ const selectedPlugin = ref<any | null>(null)
 const npmInstallPanelRef = ref<InstanceType<typeof NpmInstallPanel>>()
 
 // 过滤状态
-const filterStatus = ref<'all' | 'running'>('all')
+const filterStatus = ref<'all' | 'running' | 'upgradable'>('all')
 
 // 置顶列表（插件 path 有序数组，持久化到 db）
 const PINNED_PLUGINS_KEY = 'plugin-center-pinned'
@@ -77,15 +79,25 @@ const upgradablePlugins = computed(() => {
   return plugins.value.filter((p) => p.hasUpdate && p.marketPlugin)
 })
 
+// 可更新插件列表（经过搜索过滤，用于「更新」栏目）
+const upgradableFilteredPlugins = computed(() => {
+  return searchFilteredPlugins.value.filter((p) => p.hasUpdate && p.marketPlugin)
+})
+
+// 「更新」栏目显示的数量（经过搜索过滤）
+const upgradableTabCount = computed(() => upgradableFilteredPlugins.value.length)
+
 // 可升级插件数量（用于菜单显示与批量更新）
 const upgradablePluginsCount = computed(() => upgradablePlugins.value.length)
 
 // 最终显示的插件列表（根据状态过滤，置顶的排在最前）
 const filteredPlugins = computed(() => {
-  let list =
-    filterStatus.value === 'running'
-      ? searchFilteredPlugins.value.filter((p) => isPluginRunning(p.path))
-      : searchFilteredPlugins.value
+  let list = searchFilteredPlugins.value
+  if (filterStatus.value === 'running') {
+    list = list.filter((p) => isPluginRunning(p.path))
+  } else if (filterStatus.value === 'upgradable') {
+    list = upgradableFilteredPlugins.value
+  }
   const pinnedOrder = pinnedPluginPaths.value
   if (pinnedOrder.length === 0) return list
   const pinnedSet = new Set(pinnedOrder)
@@ -153,7 +165,10 @@ function buildPluginList(installedPlugins: any[], marketPluginMap?: Map<string, 
         localVersion: plugin.version,
         latestVersion: market?.version,
         marketPlugin: market,
-        hasUpdate: !!market?.version && compareVersions(plugin.version, market.version) < 0
+        hasUpdate:
+          !plugin.isDevelopment &&
+          !!market?.version &&
+          compareVersions(plugin.version, market.version) < 0
       }
     })
     .sort((a: any, b: any) => {
@@ -169,6 +184,7 @@ let marketCheckSeq = 0
 // 异步检查市场更新，补充 hasUpdate / marketPlugin 等字段
 async function checkMarketUpdates(): Promise<void> {
   const seq = ++marketCheckSeq
+  isCheckingMarketUpdates.value = true
   try {
     const marketResult = await window.ztools.internal.fetchPluginMarket()
     if (seq !== marketCheckSeq) return // 已被新调用取代，丢弃结果
@@ -195,8 +211,18 @@ async function checkMarketUpdates(): Promise<void> {
       }),
       marketPluginMap
     )
+    if (selectedPlugin.value) {
+      const updated = plugins.value.find((p: any) => p.path === selectedPlugin.value?.path)
+      if (updated) {
+        selectedPlugin.value = updated
+      }
+    }
   } catch (err) {
     console.error('检查市场更新失败:', err)
+  } finally {
+    if (seq === marketCheckSeq) {
+      isCheckingMarketUpdates.value = false
+    }
   }
 }
 
@@ -462,6 +488,13 @@ async function handleOpenFolder(plugin: any): Promise<void> {
   }
 }
 
+function handleOpenMarketDetail(plugin: any): void {
+  jumpFunctionPluginMarketSetting({
+    type: 'detail',
+    payload: plugin.name
+  })
+}
+
 async function handleTogglePluginDisabled(plugin: any, disabled: boolean): Promise<void> {
   try {
     const result = await window.ztools.internal.setPluginDisabled(plugin.path, disabled)
@@ -581,13 +614,7 @@ async function openPluginByPayload(payload: string): Promise<void> {
     })
   }
 
-  let pluginName = payload
-  try {
-    const parsed = JSON.parse(payload)
-    pluginName = typeof parsed === 'string' ? parsed : (parsed?.pluginName ?? payload)
-  } catch {
-    // payload is a plain string
-  }
+  const pluginName = payload
 
   const plugin = plugins.value.find((candidate) => candidate.name === pluginName)
   if (plugin) {
@@ -692,11 +719,18 @@ async function handleInstallFromNpm(data: {
               运行中
               <span class="tab-count">{{ runningPluginsCount }}</span>
             </button>
+            <button
+              class="tab-btn"
+              :class="{ active: filterStatus === 'upgradable' }"
+              @click="filterStatus = 'upgradable'"
+            >
+              更新
+              <span class="tab-count" :class="{ 'tab-count-update': upgradableTabCount > 0 }">
+                {{ upgradableTabCount }}
+              </span>
+            </button>
           </div>
           <div class="button-group">
-            <button class="btn" :disabled="isImporting" @click="importPlugin">
-              {{ isImporting ? '导入中...' : '导入本地插件' }}
-            </button>
             <div class="more-menu-wrapper">
               <button class="btn btn-more" @click="toggleMoreMenu">
                 更多
@@ -715,6 +749,24 @@ async function handleInstallFromNpm(data: {
                 </svg>
               </button>
               <div v-if="showMoreMenu" class="more-menu" @click="closeMoreMenu">
+                <button class="more-menu-item" :disabled="isImporting" @click="importPlugin">
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path
+                      d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"
+                    ></path>
+                  </svg>
+                  {{ isImporting ? '导入中...' : '导入本地插件' }}
+                </button>
                 <button
                   class="more-menu-item"
                   :disabled="isImportingNpm"
@@ -738,16 +790,21 @@ async function handleInstallFromNpm(data: {
                   {{ isImportingNpm ? '安装中...' : '从 npm 安装' }}
                 </button>
                 <button
-                  v-if="upgradablePluginsCount > 0"
                   class="more-menu-item"
-                  :disabled="isUpgradingAll"
+                  :disabled="
+                    isUpgradingAll || isCheckingMarketUpdates || upgradablePluginsCount === 0
+                  "
                   @click="handleUpgradeAllPlugins"
                 >
                   <div class="i-z-refresh font-size-16px" />
                   {{
-                    isUpgradingAll
-                      ? `更新中... ${upgradeProgressDone}/${upgradeProgressTotal}`
-                      : `全部更新 (${upgradablePluginsCount})`
+                    isCheckingMarketUpdates
+                      ? '检测更新中...'
+                      : isUpgradingAll
+                        ? `更新中... ${upgradeProgressDone}/${upgradeProgressTotal}`
+                        : upgradablePluginsCount > 0
+                          ? `全部更新 (${upgradablePluginsCount})`
+                          : '暂无可更新'
                   }}
                 </button>
                 <button
@@ -816,6 +873,11 @@ async function handleInstallFromNpm(data: {
               />
               <div v-else class="plugin-icon-placeholder">🧩</div>
               <span v-if="plugin.isDevelopment" class="plugin-dev-badge">DEV</span>
+              <span
+                v-if="plugin.hasUpdate"
+                class="plugin-update-dot"
+                :title="`有新版本 v${plugin.latestVersion}`"
+              ></span>
             </div>
 
             <div class="plugin-info">
@@ -926,9 +988,27 @@ async function handleInstallFromNpm(data: {
             <div class="empty-hint">点击"导入本地插件"来安装你的第一个插件</div>
           </div>
 
+          <!-- 更新栏目为空 -->
+          <div
+            v-else-if="
+              !isLoading &&
+              plugins.length > 0 &&
+              filteredPlugins.length === 0 &&
+              filterStatus === 'upgradable' &&
+              !searchQuery
+            "
+            class="empty-state"
+          >
+            <div class="i-z-plugin empty-icon font-size-64px" />
+            <div class="empty-text">
+              {{ isCheckingMarketUpdates ? '正在检测更新...' : '全部插件均为最新版本' }}
+            </div>
+            <div v-if="!isCheckingMarketUpdates" class="empty-hint">有新版本的插件会出现在这里</div>
+          </div>
+
           <!-- 搜索无结果 -->
           <div
-            v-if="!isLoading && plugins.length > 0 && filteredPlugins.length === 0"
+            v-else-if="!isLoading && plugins.length > 0 && filteredPlugins.length === 0"
             class="empty-state"
           >
             <div class="i-z-plugin empty-icon font-size-64px" />
@@ -947,11 +1027,13 @@ async function handleInstallFromNpm(data: {
         :is-running="isPluginRunning(selectedPlugin.path)"
         :is-pinned="isPluginPinned(selectedPlugin.path)"
         :is-disabled="isPluginDisabled(selectedPlugin.path)"
+        :show-market-button="!!selectedPlugin.marketPlugin"
         @back="closePluginDetail"
         @open="handleOpenPlugin(selectedPlugin)"
         @uninstall="handleUninstallFromDetail(selectedPlugin, $event)"
         @kill="handleKillPlugin(selectedPlugin)"
         @open-folder="handleOpenFolder(selectedPlugin)"
+        @open-market="handleOpenMarketDetail(selectedPlugin)"
         @toggle-pin="togglePin(selectedPlugin)"
         @toggle-disabled="handleTogglePluginDisabled(selectedPlugin, $event)"
       />
@@ -1080,6 +1162,12 @@ async function handleInstallFromNpm(data: {
   color: var(--primary-color);
 }
 
+.tab-count.tab-count-update,
+.tab-btn.active .tab-count.tab-count-update {
+  background: var(--danger-color, #ef4444);
+  color: #fff;
+}
+
 .button-group {
   display: flex;
   gap: 10px;
@@ -1176,6 +1264,18 @@ async function handleInstallFromNpm(data: {
   font-weight: 700;
   line-height: 1;
   padding: 2px 4px;
+}
+
+.plugin-update-dot {
+  position: absolute;
+  top: -3px;
+  left: -3px;
+  z-index: 1;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--danger-color, #ef4444);
+  border: 1.5px solid var(--bg-color);
 }
 
 .disabled-badge {

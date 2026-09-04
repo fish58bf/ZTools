@@ -1,5 +1,5 @@
 import { BrowserWindow, ipcMain, screen } from 'electron'
-import path from 'path'
+import { getPreloadPath, getRendererPath } from '../utils/appBundlePath'
 import { is } from '@electron-toolkit/utils'
 import {
   ClipboardMonitor,
@@ -10,13 +10,16 @@ import {
 } from './native/index.js'
 import { launchApp } from './commandLauncher/index.js'
 import databaseAPI from '../api/shared/database.js'
+import dndManager from './dndManager.js'
 import pluginsAPI from '../api/renderer/plugins.js'
 import windowManager from '../managers/windowManager.js'
 import clipboardManager, { type LastCopiedContent } from '../managers/clipboardManager.js'
+import type { PluginManager } from '../managers/pluginManager.js'
 import { applyWindowMaterial, getDefaultWindowMaterial } from '../utils/windowUtils.js'
-import translationManager from './translationManager.js'
+import providerManager from './provider/providerManager.js'
 import { filterSuperPanelPinnedCommands } from './superPanelPinnedCommands.js'
 import { decodeFileUrlToPath } from '../utils/common'
+import { shouldKeepMainWindowHiddenForLaunch } from '../../shared/pluginLaunch'
 
 // 超级面板窗口尺寸
 const SUPER_PANEL_WIDTH = 250
@@ -53,6 +56,7 @@ interface SuperPanelConfig {
 class SuperPanelManager {
   private superPanelWindow: BrowserWindow | null = null
   private mainWindow: BrowserWindow | null = null
+  private pluginManager: PluginManager | null = null
   private windowReady = false
   private pendingMessages: Array<{ channel: string; data: any }> = []
   private windowCommandRequestId = 0
@@ -65,10 +69,14 @@ class SuperPanelManager {
   }
 
   /**
-   * 初始化超级面板管理器
+   * 初始化超级面板管理器。
+   * @param mainWindow 主窗口实例。
+   * @param pluginManager 插件管理器，用于在主窗口显示前判断 feature 的 `mainHide` 配置。
+   * @returns 无返回值。
    */
-  init(mainWindow: BrowserWindow): void {
+  init(mainWindow: BrowserWindow, pluginManager: PluginManager): void {
     this.mainWindow = mainWindow
+    this.pluginManager = pluginManager
     this.setupIPC()
     this.loadConfig()
   }
@@ -281,6 +289,11 @@ class SuperPanelManager {
         }
       }
 
+      if (dndManager.shouldIgnoreHotkeys()) {
+        console.log('[SuperPanel] 游戏模式/全屏屏蔽，跳过触发')
+        return { shouldBlock: false }
+      }
+
       // 异步部分：模拟复制、读取剪贴板、显示面板
       this.onMouseTriggerAsync(cursorPoint)
 
@@ -360,7 +373,7 @@ class SuperPanelManager {
       hasShadow: true,
       type: 'panel',
       webPreferences: {
-        preload: path.join(__dirname, '../preload/index.js'),
+        preload: getPreloadPath(),
         backgroundThrottling: false,
         contextIsolation: true,
         nodeIntegration: false,
@@ -395,7 +408,7 @@ class SuperPanelManager {
     if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
       win.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/super-panel.html`)
     } else {
-      win.loadFile(path.join(__dirname, '../renderer/super-panel.html'))
+      win.loadFile(getRendererPath('super-panel.html'))
     }
 
     // 窗口加载完成后显示
@@ -524,17 +537,19 @@ class SuperPanelManager {
 
   /**
    * 请求翻译选中的文本
+   * 经 providerManager 按用户默认翻译提供商分发（内置 Bergamot 或插件翻译 provider）。
    */
   private async requestTranslation(text: string): Promise<void> {
     try {
-      const translation = await translationManager.translate(text)
-      if (translation) {
+      const result = await providerManager.invoke('translation', { text })
+      if (result?.text) {
         this.sendToSuperPanel('super-panel-translation', {
-          text: translation,
+          text: result.text,
           sourceText: text
         })
       }
     } catch (error) {
+      // 没有可用的翻译提供商属于正常情形（用户未启用），静默处理
       console.error('[SuperPanel] 翻译请求失败:', error)
     }
   }
@@ -612,7 +627,8 @@ class SuperPanelManager {
   }
 
   /**
-   * 设置 IPC 监听
+   * 注册超级面板相关 IPC 处理器。
+   * @returns 无返回值。
    */
   private setupIPC(): void {
     // 主窗口返回搜索结果（携带剪贴板内容）
@@ -644,16 +660,30 @@ class SuperPanelManager {
           return { success: false, error: '主窗口不可用' }
         }
 
-        // 先显示主窗口，确保渲染进程能正常处理启动指令
+        // 在主窗口显示前读取 mainHide，避免匹配到隐藏型 feature 时出现搜索窗口闪烁。
+        const shouldKeepMainWindowHidden =
+          command.type === 'plugin' &&
+          typeof command.path === 'string' &&
+          typeof command.featureCode === 'string' &&
+          shouldKeepMainWindowHiddenForLaunch(
+            'super-panel',
+            this.pluginManager?.shouldKeepMainWindowHidden(command.path, command.featureCode) ===
+              true
+          )
+
+        // 先显示主窗口，确保普通插件命令的渲染进程能正常处理启动指令。
         if (this.currentWindowInfo) {
           windowManager.setPreviousActiveWindow(this.currentWindowInfo)
         }
-        this.mainWindow.show()
+        if (!shouldKeepMainWindowHidden) {
+          this.mainWindow.show()
+        }
 
         // 转发给主渲染进程，由 handleSelectApp 统一处理
         // 携带剪贴板内容作为 payload 来源
         this.mainWindow.webContents.send('super-panel-launch', {
           command,
+          launchSource: 'super-panel',
           clipboardContent: this.currentClipboardContent,
           windowInfo: command.windowInfo || this.currentWindowInfo
         })

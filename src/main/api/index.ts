@@ -13,6 +13,7 @@ import appsAPI from './renderer/commands'
 import localShortcutsAPI from './renderer/localShortcuts'
 import pluginsAPI from './renderer/plugins'
 import settingsAPI from './renderer/settings'
+import storageAPI from './renderer/storage'
 import syncAPI from './renderer/sync'
 import systemAPI from './renderer/system'
 import { systemSettingsAPI } from './renderer/systemSettings'
@@ -31,19 +32,30 @@ import pluginInputAPI from './plugin/input'
 import internalPluginAPI from './plugin/internal'
 import pluginLifecycleAPI from './plugin/lifecycle'
 import { initPluginApiDispatcher } from './plugin/pluginApiDispatcher'
+import pluginProvidersAPI from './plugin/providers'
 import pluginRedirectAPI from './plugin/redirect'
 import pluginScreenAPI from './plugin/screen'
 import pluginShellAPI from './plugin/shell'
 import pluginToastAPI from './plugin/toast'
 import pluginToolsAPI from './plugin/tools'
 import pluginUIAPI from './plugin/ui'
+import pluginUserAPI from './plugin/user'
 import pluginWindowAPI from './plugin/window'
 import { setupImageAnalysisAPI } from './shared/imageAnalysis'
+import {
+  matchesFilesInput,
+  matchesOverText,
+  matchesRegexText,
+  type FilesCmdLike,
+  type OverCmdLike,
+  type RegexCmdLike
+} from '@shared/commandContextShared'
 import zbrowserAPI from './plugin/zbrowser'
 import pluginFFmpegAPI from './plugin/ffmpeg'
 
 import httpServer from '../core/httpServer'
 import mcpServer from '../core/mcpServer'
+import providerManager from '../core/provider/providerManager'
 import { runStartupDataMigrations } from '../core/startupDataMigrations'
 import superPanelManager from '../core/superPanelManager'
 import translationManager from '../core/translationManager'
@@ -97,28 +109,36 @@ class APIManager {
     appsAPI.init(mainWindow, pluginManager)
     appsAPI.setShowWindowCallback(() => windowManager.showWindow())
     pluginsAPI.init(mainWindow, pluginManager)
+    pluginsAPI.setCommandsCacheInvalidator(() => appsAPI.invalidateCommandsCache(false))
     windowAPI.init(mainWindow)
     settingsAPI.init(mainWindow, pluginManager)
+    storageAPI.init()
     systemAPI.init(mainWindow)
     systemSettingsAPI.init()
-    syncAPI.init(mainWindow)
+    syncAPI.init(mainWindow, pluginManager)
     localShortcutsAPI.init(mainWindow)
+    localShortcutsAPI.setCommandsCacheInvalidator(() => appsAPI.invalidateCommandsCache(false))
 
     // 初始化插件 API 统一分发器（必须在插件 API 初始化之前）
     initPluginApiDispatcher()
 
     // 初始化插件API
     pluginToolsAPI.init(pluginManager)
+    // Provider 管理器（翻译、OCR 等），需在插件 API 之后、消费方之前初始化
+    providerManager.init(pluginManager)
+    // 暴露给所有插件的 provider 消费入口（查询默认渠道 / 调用），依赖 providerManager 已就绪
+    pluginProvidersAPI.init()
     pluginAiAPI.init(mainWindow, pluginManager)
     pluginLifecycleAPI.init(mainWindow, pluginManager)
     pluginUIAPI.init(mainWindow, pluginManager)
+    pluginUserAPI.init(pluginManager)
     // 注入主题信息变更钩子：当主题色/材质变更时通知所有插件视图
     windowManager.setOnThemeInfoChanged(() => {
       pluginUIAPI.broadcastThemeInfoToAllPlugins()
     })
     pluginClipboardAPI.init()
     pluginDeviceAPI.init()
-    pluginDialogAPI.init(mainWindow)
+    pluginDialogAPI.init(mainWindow, pluginManager)
     pluginWindowAPI.init(mainWindow, pluginManager)
     pluginScreenAPI.init(mainWindow)
     // 初始化插件输入 API（需要 windowManager 和 clipboardManager 支持 paste/type 功能）
@@ -127,6 +147,7 @@ class APIManager {
     pluginShellAPI.init(clipboardManager)
     pluginRedirectAPI.init(mainWindow, pluginManager)
     pluginFeatureAPI.init(pluginManager)
+    pluginFeatureAPI.setCommandsCacheInvalidator(() => appsAPI.invalidateCommandsCache(false))
     pluginHttpAPI.init(pluginManager)
     pluginToastAPI.init(pluginManager)
     pluginFFmpegAPI.init()
@@ -140,7 +161,8 @@ class APIManager {
     // 初始化软件更新API
     updaterAPI.init(mainWindow)
 
-    // 初始化 HTTP 服务
+    // 初始化 HTTP 服务，并复用应用内插件启动入口处理外部插件启动请求。
+    httpServer.setPluginLauncher((options) => this.launchPlugin(options))
     httpServer.init().catch((error) => {
       console.error('[API] HTTP 服务初始化失败:', error)
     })
@@ -150,10 +172,25 @@ class APIManager {
     })
 
     // 初始化超级面板管理器
-    superPanelManager.init(mainWindow)
+    superPanelManager.init(mainWindow, pluginManager)
 
     // 初始化翻译管理器
     translationManager.init()
+
+    // 将内置 Bergamot 翻译引擎注册为 translation 类型 provider
+    providerManager.registerBuiltinProvider({
+      name: 'bergamot',
+      type: 'translation',
+      label: '离线翻译引擎（Bergamot）',
+      description: '英译中离线引擎，首次启用需下载约 55MB 模型',
+      isReady: () => translationManager.getStatus().status === 'ready',
+      invoke: async (input) => {
+        const { text, from } = input as { text: string; from?: string; to?: string }
+        // 当前内置引擎仅支持 en→zh，忽略 from/to 参数
+        const result = await translationManager.translate(text)
+        return { text: result || '', detectedFrom: from }
+      }
+    })
 
     // 设置一些特殊的IPC处理器
     this.setupSpecialHandlers()
@@ -213,6 +250,13 @@ class APIManager {
   }
 
   /**
+   * 清理 API 管理器持有的运行时资源。
+   */
+  public cleanup(): void {
+    settingsAPI.cleanup()
+  }
+
+  /**
    * 设置启动参数（用于插件进入时传递参数）
    */
   public setLaunchParam(param: any): void {
@@ -237,6 +281,10 @@ class APIManager {
     return databaseAPI.dbGet(key)
   }
 
+  public dbRemove(key: string): any {
+    return databaseAPI.dbRemove(key)
+  }
+
   /**
    * 启动插件（供其他模块使用）
    */
@@ -259,12 +307,22 @@ class APIManager {
   }
 
   /**
+   * 归一化快捷键目标字符串，兼容历史上带空格的“插件 / 指令”格式。
+   */
+  private parseShortcutTarget(target: string): string[] {
+    return target
+      .split('/')
+      .map((part) => part.trim())
+      .filter((part) => part.length > 0)
+  }
+
+  /**
    * 预解析全局快捷键目标，判断启动前是否需要采集选中文本。
    * 仅文本类插件命令会触发复制取词，避免无关快捷键产生副作用。
    */
   public async prepareGlobalShortcut(target: string): Promise<GlobalShortcutPreparation> {
     try {
-      const parts = target.split('/')
+      const parts = this.parseShortcutTarget(target)
       const plugins: any = databaseAPI.dbGet('plugins')
       const disabledPlugins = pluginsAPI.getDisabledPluginSet()
       const pluginList = Array.isArray(plugins)
@@ -291,11 +349,11 @@ class APIManager {
         return { target, shouldCaptureSelectedText: false }
       }
 
-      const pluginMatches: { cmdType: string }[] = []
+      const pluginMatches: Array<{ cmdType: string; plugin: any; feature: any }> = []
       for (const plugin of pluginList) {
         const result = await this.findCommandInPlugin(plugin, target)
         if (result) {
-          pluginMatches.push({ cmdType: result.cmdType })
+          pluginMatches.push({ cmdType: result.cmdType, plugin, feature: result.feature })
         }
       }
 
@@ -315,38 +373,159 @@ class APIManager {
   }
 
   /**
+   * 获取快捷键上下文中的有效文本输入。
+   */
+  private getShortcutTextInput(context?: ShortcutLaunchContext): string {
+    return context?.pastedText ?? context?.searchQuery ?? ''
+  }
+
+  /**
+   * 判断当前快捷键上下文是否包含可用于细粒度匹配的输入。
+   */
+  private hasContextualShortcutInput(context?: ShortcutLaunchContext): boolean {
+    if (!context) {
+      return false
+    }
+
+    if (context.pastedImage) {
+      return true
+    }
+
+    if (Array.isArray(context.pastedFiles) && context.pastedFiles.length > 0) {
+      return true
+    }
+
+    return this.getShortcutTextInput(context).trim().length > 0
+  }
+
+  /**
+   * 判断文本类匹配指令是否满足当前快捷键上下文。
+   */
+  private matchesTextCommandContext(cmd: any, text: string): boolean {
+    if (cmd?.type === 'regex') {
+      return matchesRegexText(text, cmd as RegexCmdLike, { preserveFlags: true })
+    }
+
+    if (cmd?.type === 'over') {
+      return matchesOverText(text, cmd as OverCmdLike, {
+        useExclude: true,
+        preserveExcludeFlags: true,
+        allowPlainExclude: true
+      })
+    }
+
+    return false
+  }
+
+  /**
+   * 判断文件类匹配指令是否满足当前快捷键上下文。
+   */
+  private matchesFilesCommandContext(cmd: any, files: ShortcutInputFile[]): boolean {
+    return matchesFilesInput(files, cmd as FilesCmdLike, {
+      preserveFlags: true,
+      allowPlainString: true
+    })
+  }
+
+  /**
+   * 计算候选命令在当前快捷键上下文下的优先级。
+   */
+  private getCommandContextPriority(
+    cmd: any,
+    cmdType: string,
+    context?: ShortcutLaunchContext
+  ): number {
+    if (!this.hasContextualShortcutInput(context)) {
+      return 0
+    }
+
+    if (cmdType === 'files') {
+      return this.matchesFilesCommandContext(cmd, context?.pastedFiles || []) ? 500 : -1
+    }
+
+    if (cmdType === 'img') {
+      return context?.pastedImage ? 450 : -1
+    }
+
+    const textInput = this.getShortcutTextInput(context)
+    if (cmdType === 'regex') {
+      return this.matchesTextCommandContext(cmd, textInput) ? 400 : -1
+    }
+
+    if (cmdType === 'over') {
+      return this.matchesTextCommandContext(cmd, textInput) ? 350 : -1
+    }
+
+    return 0
+  }
+
+  /**
    * 在指定插件中查找匹配的命令
    */
   private async findCommandInPlugin(
     plugin: any,
-    cmdName: string
+    cmdName: string,
+    context?: ShortcutLaunchContext
   ): Promise<{ feature: any; cmdLabel: string; cmdType: string } | null> {
     const dynamicFeatures = pluginFeatureAPI.loadDynamicFeatures(plugin.name)
     const allFeatures = [...(plugin.features || []), ...dynamicFeatures]
+    const matches: Array<{ feature: any; cmdLabel: string; cmdType: string; cmd: any }> = []
 
     for (const feature of allFeatures) {
       if (feature.cmds && Array.isArray(feature.cmds)) {
         for (const cmd of feature.cmds) {
-          // 处理字符串类型的命令
           if (typeof cmd === 'string') {
             if (cmd === cmdName) {
-              return { feature, cmdLabel: cmd, cmdType: 'text' }
+              matches.push({ feature, cmdLabel: cmd, cmdType: 'text', cmd })
             }
+            continue
           }
-          // 处理 object 类型的命令（regex 和 over 类型）
-          else if (typeof cmd === 'object' && cmd.label) {
-            if (cmd.label === cmdName) {
-              return { feature, cmdLabel: cmd.label, cmdType: cmd.type || 'text' }
-            }
+
+          if (typeof cmd === 'object' && cmd?.label === cmdName) {
+            matches.push({ feature, cmdLabel: cmd.label, cmdType: cmd.type || 'text', cmd })
           }
         }
       }
     }
-    return null
+
+    if (matches.length === 0) {
+      return null
+    }
+
+    if (!this.hasContextualShortcutInput(context)) {
+      const [firstMatch] = matches
+      return {
+        feature: firstMatch.feature,
+        cmdLabel: firstMatch.cmdLabel,
+        cmdType: firstMatch.cmdType
+      }
+    }
+
+    const prioritizedMatch = matches
+      .map((match, index) => ({
+        ...match,
+        index,
+        priority: this.getCommandContextPriority(match.cmd, match.cmdType, context)
+      }))
+      .sort((a, b) => b.priority - a.priority || a.index - b.index)[0]
+
+    const selectedMatch = prioritizedMatch.priority > 0 ? prioritizedMatch : matches[0]
+    return {
+      feature: selectedMatch.feature,
+      cmdLabel: selectedMatch.cmdLabel,
+      cmdType: selectedMatch.cmdType
+    }
   }
 
   /**
-   * 启动匹配到的插件命令
+   * 启动匹配到的插件命令。
+   * @param plugin 匹配到的插件信息。
+   * @param feature 匹配到的 feature 配置。
+   * @param cmdLabel 命令显示名称。
+   * @param cmdType 命令类型。
+   * @param context 全局快捷键携带的输入上下文。
+   * @returns 插件启动完成后的 Promise。
+   * @throws 插件启动失败时拒绝该 Promise。
    */
   private async launchMatchedPlugin(
     plugin: any,
@@ -361,6 +540,7 @@ class APIManager {
       featureCode: feature.code,
       name: cmdLabel,
       cmdType,
+      launchSource: 'global-shortcut' as const,
       param: {
         ...this.buildShortcutLaunchParam(cmdType, context),
         code: feature.code
@@ -412,7 +592,7 @@ class APIManager {
         ? plugins.filter((plugin: any) => !disabledPlugins.has(plugin.path))
         : []
 
-      const parts = target.split('/')
+      const parts = this.parseShortcutTarget(target)
 
       if (parts.length === 2) {
         // 格式: 插件名称/指令名称
@@ -429,7 +609,7 @@ class APIManager {
           return
         }
 
-        const result = await this.findCommandInPlugin(plugin, cmdName)
+        const result = await this.findCommandInPlugin(plugin, cmdName, context)
         if (!result) {
           const msg = `[API] 未找到命令: ${pluginDescription}/${cmdName}`
           console.error(msg)
@@ -452,7 +632,7 @@ class APIManager {
         const pluginMatches: { plugin: any; feature: any; cmdLabel: string; cmdType: string }[] = []
 
         for (const plugin of pluginList) {
-          const result = await this.findCommandInPlugin(plugin, cmdName)
+          const result = await this.findCommandInPlugin(plugin, cmdName, context)
           if (result) {
             pluginMatches.push({
               plugin,

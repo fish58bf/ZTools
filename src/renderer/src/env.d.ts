@@ -1,6 +1,10 @@
+/// <reference types="vite-svg-loader" />
+
 // Ambient type declarations for renderer, so TS knows window.ztools
 
 import type { CommonKeyboardModifier } from '@renderer/utils/convertKeyboardEvent'
+import type { SearchWallpaperConfig } from '@shared/searchWallpaper'
+import type { AiRequestStatusChange } from '@shared/aiRequestStatus'
 
 /**
  * 上次匹配状态接口
@@ -33,6 +37,32 @@ interface SuperPanelWindowInfo {
 
 interface FileLocationWindowInfo extends SuperPanelWindowInfo {}
 
+interface PluginUpdateCheckResult {
+  success: boolean
+  updateAvailable: boolean
+  currentVersion?: string
+  latestVersion?: string
+  plugin?: {
+    name: string
+    version: string
+    title?: string
+    logo?: string
+    updatedAt?: number
+  }
+  reason?: string
+  error?: string
+}
+
+interface PluginMarketDownloadProgress {
+  pluginName: string
+  taskId: string
+  status: 'downloading' | 'installing' | 'success' | 'error' | 'cancelled'
+  progress: number | null
+  receivedBytes?: number
+  totalBytes?: number
+  error?: string
+}
+
 declare global {
   interface Window {
     electron: {
@@ -53,10 +83,13 @@ declare global {
         name?: string
         cmdType?: string // cmd 类型（用于判断是否添加历史记录）
         confirmDialog?: any // 确认对话框配置
+        launchSource?: 'search' | 'global-shortcut' | 'super-panel'
       }) => Promise<any>
       launchAsAdmin: (appPath: string, name?: string) => Promise<void>
       hideWindow: () => void
       resizeWindow: (height: number) => void
+      onUpdateCompactMainWindowHeader: (callback: (enabled: boolean) => void) => () => void
+      onUpdateHideMainWindowOnPluginEsc: (callback: (enabled: boolean) => void) => () => void
       updateLaunchContext: (context: {
         searchQuery: string
         pastedImage: string | null
@@ -66,13 +99,8 @@ declare global {
       getWindowPosition: () => Promise<{ x: number; y: number }>
       setWindowPosition: (x: number, y: number) => void
       setWindowSizeLock: (lock: boolean) => void
-      setWindowOpacity: (opacity: number) => void
       getWindowMaterial: () => Promise<'mica' | 'acrylic' | 'none'>
-      setTrayIconVisible: (visible: boolean) => Promise<void>
       setWindowMaterial: (material: 'mica' | 'acrylic' | 'none') => Promise<{ success: boolean }>
-      setLaunchAtLogin: (enable: boolean) => Promise<void>
-      getLaunchAtLogin: () => Promise<boolean>
-      setTheme: (theme: string) => Promise<void>
       openExternal: (url: string) => Promise<void>
       copyToClipboard: (text: string) => Promise<void>
       openTerminal: (path: string) => Promise<void>
@@ -94,55 +122,27 @@ declare global {
       ) => Promise<{ success: boolean; error?: string }>
       revealInFinder: (filePath: string) => Promise<void>
       showContextMenu: (menuItems: any[]) => Promise<void>
-      getPlugins: () => Promise<any[]>
       getAllPlugins: () => Promise<any[]>
       getDisabledPlugins: () => Promise<string[]>
-      setPluginDisabled: (
-        pluginPath: string,
-        disabled: boolean
+      setPluginMainPushEnabled: (
+        pluginName: string,
+        enabled: boolean
       ) => Promise<{ success: boolean; error?: string }>
-      importPlugin: () => Promise<{ success: boolean; error?: string }>
-      // 导入开发中的插件工程，可选直接传入 plugin.json 路径
-      importDevPlugin: (pluginJsonPath?: string) => Promise<{ success: boolean; error?: string }>
-      removeDevProject: (pluginName: string) => Promise<{ success: boolean; error?: string }>
-      fetchPluginMarket: () => Promise<{
-        success: boolean
-        data?: any
-        storefront?: any
-        error?: string
-      }>
-      installPluginFromMarket: (plugin: any) => Promise<{
-        success: boolean
-        error?: string
-        plugin?: any
-        cancelled?: boolean
-      }>
-      cancelPluginMarketDownload: (
-        pluginNameOrTaskId: string
-      ) => Promise<{ success: boolean; error?: string }>
-      onPluginMarketDownloadProgress: (callback: (payload: any) => void) => () => void
-      installPluginFromNpm: (options: {
-        packageName: string
-        useChinaMirror?: boolean
-      }) => Promise<{
-        success: boolean
-        error?: string
-        plugin?: any
-      }>
-      getPluginReadme: (pluginPath: string) => Promise<{
-        success: boolean
-        content?: string
-        error?: string
-      }>
-      getPluginDbData: (pluginName: string) => Promise<{
-        success: boolean
-        data?: Array<{ id: string; data: any; rev?: string; updatedAt?: string }>
-        error?: string
-      }>
-      deletePlugin: (pluginPath: string) => Promise<{ success: boolean; error?: string }>
-      getRunningPlugins: () => Promise<string[]>
-      killPlugin: (pluginPath: string) => Promise<{ success: boolean; error?: string }>
       killPluginAndReturn: (pluginPath: string) => Promise<{ success: boolean; error?: string }>
+      pluginUpdates: {
+        check: (pluginName: string, pluginPath: string) => Promise<PluginUpdateCheckResult>
+        upgrade: (
+          pluginName: string,
+          pluginPath: string
+        ) => Promise<{
+          success: boolean
+          error?: string
+          plugin?: any
+          cancelled?: boolean
+        }>
+        openMarket: (pluginName: string) => Promise<{ success: boolean; error?: string }>
+        onProgress: (callback: (payload: PluginMarketDownloadProgress) => void) => () => void
+      }
       // mainPush 功能
       queryMainPush: (
         pluginPath: string,
@@ -164,7 +164,6 @@ declare global {
         button?: 'left' | 'right' | 'middle'
         clickCount?: number
       }) => Promise<{ success: boolean; error?: string }>
-      selectAvatar: () => Promise<{ success: boolean; path?: string; error?: string }>
       // 历史记录管理
       removeFromHistory: (appPath: string, featureCode?: string, name?: string) => Promise<void>
       // 固定应用管理
@@ -231,12 +230,13 @@ declare global {
       registerGlobalShortcut: (
         shortcut: string,
         target: string,
-        autoCopy?: boolean
+        autoCopy?: boolean,
+        preScreenshotOptimization?: boolean
       ) => Promise<{ success: boolean; error?: string }>
       unregisterGlobalShortcut: (shortcut: string) => Promise<{ success: boolean; error?: string }>
       updateGlobalShortcutConfig: (
         shortcut: string,
-        config: { autoCopy: boolean }
+        config: { autoCopy: boolean; preScreenshotOptimization: boolean }
       ) => Promise<{ success: boolean; error?: string }>
       // 快捷键录制（临时注册，触发后自动注销）
       startHotkeyRecording: () => Promise<{ success: boolean; error?: string }>
@@ -247,38 +247,6 @@ declare global {
       dbRemove: (bucket: string, doc: any) => Promise<any>
       dbBulkDocs: (bucket: string, docs: any[]) => Promise<any>
       dbAllDocs: (bucket: string, key: string | string[]) => Promise<any>
-      // 插件数据管理
-      getPluginDataStats: () => Promise<{
-        success: boolean
-        data?: Array<{
-          pluginName: string
-          pluginTitle?: string | null
-          isDevelopment: boolean
-          docCount: number
-          attachmentCount: number
-          logo: string | null
-        }>
-        error?: string
-      }>
-      getPluginDocKeys: (pluginName: string) => Promise<{
-        success: boolean
-        data?: Array<{ key: string; type: 'document' | 'attachment' }>
-        error?: string
-      }>
-      getPluginDoc: (
-        pluginName: string,
-        key: string
-      ) => Promise<{
-        success: boolean
-        data?: any
-        type?: 'document' | 'attachment'
-        error?: string
-      }>
-      clearPluginData: (pluginName: string) => Promise<{
-        success: boolean
-        deletedCount?: number
-        error?: string
-      }>
       // 窗口相关
       windowPaste: () => Promise<{ success: boolean; error?: string }>
       onWindowInfoChanged: (
@@ -317,7 +285,10 @@ declare global {
       openSettings: () => void
       onUpdatePlaceholder: (callback: (placeholder: string) => void) => void
       onUpdateAvatar: (callback: (avatar: string) => void) => void
-      onAiStatusChanged: (callback: (status: 'idle' | 'sending' | 'receiving') => void) => void
+      onUpdateSearchWallpaper: (
+        callback: (wallpaper: SearchWallpaperConfig | null) => void
+      ) => () => void
+      onAiStatusChanged: (callback: (change: AiRequestStatusChange) => void) => void
       onUpdateAutoPaste: (callback: (autoPaste: string) => void) => void
       onUpdateAutoClear: (callback: (autoClear: string) => void) => void
       onUpdateShowRecentInSearch: (callback: (showRecentInSearch: boolean) => void) => void
@@ -343,25 +314,32 @@ declare global {
           currentVersion?: string
           latestVersion?: string
           updateInfo?: any
+          migrationRequired?: boolean
+          migrationReasons?: string[]
+          releaseUrl?: string
           error?: string
         }>
-        startUpdate: (updateInfo: any) => Promise<{ success: boolean; error?: string }>
+        showUpdateWindow: () => Promise<{ success: boolean; error?: string }>
+        startUpdate: (
+          sourceID?: number
+        ) => Promise<{ success: boolean; cancelled?: boolean; error?: string }>
+        cancelUpdate: () => Promise<{ success: boolean; cancelled?: boolean; error?: string }>
+        openDownloadSource: (sourceID: number) => Promise<{ success: boolean; error?: string }>
         installDownloadedUpdate: () => Promise<{ success: boolean; error?: string }>
         getDownloadStatus: () => Promise<{
+          hasUpdate: boolean
           hasDownloaded: boolean
           version?: string
-          changelog?: string[]
+          changelog?: string
+          status?: string
         }>
       }
-      onUpdateDownloaded: (
-        callback: (data: { version: string; changelog: string[] }) => void
-      ) => void
+      onUpdateAvailable: (callback: (data: { version: string; changelog: string }) => void) => void
+      onAutoCheckUpdateChanged: (callback: (enabled: boolean) => void) => () => void
+      onUpdateDownloaded: (callback: (data: { version: string; changelog: string }) => void) => void
       onUpdateDownloadStart: (callback: (data: { version: string }) => void) => void
       onUpdateDownloadFailed: (callback: (data: { error: string }) => void) => void
-      getAppVersion: () => Promise<string>
-      getSystemVersions: () => Promise<NodeJS.ProcessVersions>
       getPlatform: () => string
-      isWindows11: () => Promise<boolean>
       // 上次匹配状态管理
       getLastMatchState: () => Promise<LastMatchState | null>
       restoreLastMatch: () => Promise<LastMatchState | null>
@@ -394,6 +372,7 @@ declare global {
         >
         add: (type: 'file' | 'folder') => Promise<{ success: boolean; error?: string }>
         delete: (id: string) => Promise<{ success: boolean; error?: string }>
+        deleteWhenNotExist: () => Promise<{ success: boolean; error?: string }>
         open: (path: string) => Promise<{ success: boolean; error?: string }>
         updateAlias: (id: string, alias: string) => Promise<{ success: boolean; error?: string }>
       }

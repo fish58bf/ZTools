@@ -4,11 +4,10 @@ import path from 'path'
 import { pathToFileURL } from 'url'
 import api from '../api/index'
 import { BUNDLED_INTERNAL_PLUGIN_NAMES, getInternalPluginPath } from './internalPlugins'
-import { getInternalPluginUrl, getInternalPluginServerPort } from './internalPluginServer'
 
 /**
- * 加载所有内置插件
- * 在应用启动时调用，自动将内置插件添加到数据库
+ * 加载所有内置插件，并在应用启动时将插件信息写入数据库。
+ * @returns 无返回值
  */
 export function loadInternalPlugins(): void {
   console.log('[InternalPlugin] 开始加载内置插件...')
@@ -46,12 +45,8 @@ export function loadInternalPlugins(): void {
       // 构建插件信息
       const logoPath = pluginConfig.logo ? path.join(effectivePluginPath, pluginConfig.logo) : ''
 
-      // 生产环境且 server 已启动时，使用 HTTP URL 加载插件（避免 file:// 下的 CSP 限制）
-      const serverPort = getInternalPluginServerPort()
       const mainPath = pluginConfig.main
-        ? serverPort > 0
-          ? getInternalPluginUrl(pluginName, pluginConfig.main)
-          : path.join(effectivePluginPath, pluginConfig.main)
+        ? path.join(effectivePluginPath, pluginConfig.main)
         : undefined
 
       const pluginInfo = {
@@ -65,7 +60,6 @@ export function loadInternalPlugins(): void {
         isDevelopment: isDev,
         main: mainPath
       }
-      console.log('[InternalPlugin] 加载插件', pluginInfo)
 
       filteredPlugins.push(pluginInfo)
       console.log(`[InternalPlugin] 已加载内置插件: ${pluginName}`)

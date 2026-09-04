@@ -6,16 +6,20 @@ import hideWindowHtml from '../../../resources/hideWindow.html?asset'
 
 import mainPreload from '../../../resources/preload.js?asset'
 import api from '../api'
-import { WINDOW_INITIAL_HEIGHT, WINDOW_DEFAULT_HEIGHT, WINDOW_WIDTH } from '../common/constants'
-import detachedWindowManager, { DETACHED_TITLEBAR_HEIGHT } from '../core/detachedWindowManager'
+import { WINDOW_DEFAULT_HEIGHT, WINDOW_WIDTH } from '../common/constants'
+import { STANDARD_MAIN_WINDOW_HEADER_HEIGHT } from '../../shared/mainWindowLayout'
+import detachedWindowManager, {
+  DETACHED_TITLEBAR_HEIGHT,
+  type DetachedPluginUpgradeSnapshot
+} from '../core/detachedWindowManager'
 import { GLOBAL_SCROLLBAR_CSS } from '../core/globalStyles'
+import { buildPluginThemeCSS, getCurrentPluginThemeState } from '../core/pluginTheme'
 import {
   CUSTOM_INTERNAL_API_PLUGIN_NAMES_KEY,
   canPluginUseInternalApi,
   isBundledInternalPlugin,
   normalizeCustomInternalApiPluginNames
 } from '../core/internalPlugins'
-import { getInternalPluginUrl, getInternalPluginServerPort } from '../core/internalPluginServer'
 import pluginWindowManager from '../core/pluginWindowManager'
 import { registerIconProtocolForSession } from '../core/iconProtocol'
 import lmdbInstance from '../core/lmdb/lmdbInstance'
@@ -33,6 +37,7 @@ import {
   getPluginDataPrefix,
   getPluginSessionPartition
 } from '../../shared/pluginRuntimeNamespace'
+import aiRequestStatusTracker from '../core/aiRequestStatusTracker'
 
 console.log('[Plugin] mainPreload', mainPreload)
 
@@ -83,6 +88,7 @@ interface PluginViewInfo {
   path: string
   name: string
   view: WebContentsView
+  cmdName?: string
   height?: number
   subInputPlaceholder?: string
   subInputValue?: string // 搜索框的值
@@ -96,6 +102,18 @@ interface PluginViewInfo {
 interface PluginLastEnterState {
   featureCode: string
   cmdType: string
+}
+
+export interface PluginUpgradeRelaunchContext {
+  surface: 'main' | 'detached'
+  pluginName: string
+  pluginPath: string
+  featureCode: string
+  cmdName?: string
+  cmdType: string
+  param: any
+  height: number
+  detachedSnapshot?: DetachedPluginUpgradeSnapshot
 }
 
 export class PluginManager {
@@ -154,6 +172,16 @@ export class PluginManager {
   }
 
   /**
+   * 判断启动指定 feature 时是否应保持主窗口隐藏。
+   * @param pluginPath 插件目录路径。
+   * @param featureCode 要启动的 feature code。
+   * @returns feature 设置了 `mainHide: true` 时返回 true，否则返回 false。
+   */
+  public shouldKeepMainWindowHidden(pluginPath: string, featureCode: string): boolean {
+    return this.isFeatureMainHide(pluginPath, featureCode)
+  }
+
+  /**
    * 判断插件是否允许多开（pluginSetting.single 默认/true = 不可多开, false = 允许多开）
    */
   private isPluginMultiOpenAllowed(pluginPath: string): boolean {
@@ -175,8 +203,11 @@ export class PluginManager {
   }
 
   /**
-   * 解析插件入口 URL
-   * @returns pluginUrl（字符串）以及是否无界面插件
+   * 根据插件类型和运行环境解析插件视图入口 URL。
+   * @param pluginPath 插件文件所在目录
+   * @param pluginConfig 插件配置
+   * @param isDevelopment 是否以开发模式运行插件
+   * @returns 插件入口 URL 及无界面插件标记
    */
   private resolvePluginUrl(
     pluginPath: string,
@@ -189,19 +220,20 @@ export class PluginManager {
       console.log('[Plugin] 检测到无界面插件(Config):', pluginConfig.name)
       return { pluginUrl: pathToFileURL(hideWindowHtml).href, isConfigHeadless }
     }
-    if (isDevelopment && pluginConfig.development?.main) {
-      console.log('[Plugin] 开发中插件，使用 development.main:', pluginConfig.development.main)
-      return { pluginUrl: pluginConfig.development.main, isConfigHeadless }
+    if (isDevelopment) {
+      // E2E 使用独立端口，避免占用日常设置插件开发服务器的 5177 端口。
+      const developmentMain =
+        pluginConfig.name === 'setting' && process.env.ZTOOLS_SETTING_DEV_SERVER_URL
+          ? process.env.ZTOOLS_SETTING_DEV_SERVER_URL
+          : pluginConfig.development?.main
+      if (developmentMain) {
+        console.log('[Plugin] 开发中插件，使用 development.main:', developmentMain)
+        return { pluginUrl: developmentMain, isConfigHeadless }
+      }
     }
     if (pluginConfig.main.startsWith('http')) {
       console.log('[Plugin] 网络插件:', pluginConfig.main)
       return { pluginUrl: pluginConfig.main, isConfigHeadless }
-    }
-    // 生产环境内置插件：使用本地 HTTP server 加载（避免 file:// 下的 CSP 限制）
-    if (isBundledInternalPlugin(pluginConfig.name) && getInternalPluginServerPort() > 0) {
-      const httpUrl = getInternalPluginUrl(pluginConfig.name, pluginConfig.main)
-      console.log('[Plugin] 内置插件使用 HTTP server:', httpUrl)
-      return { pluginUrl: httpUrl, isConfigHeadless }
     }
     return {
       pluginUrl: pathToFileURL(path.join(pluginPath, pluginConfig.main)).href,
@@ -320,7 +352,7 @@ export class PluginManager {
   // 记录最近一次插件 ESC 触发的时间，用于短时间内抑制主窗口 hide
   private lastPluginEscTime: number | null = null
   // 插件默认高度（可配置）
-  private pluginDefaultHeight: number = WINDOW_DEFAULT_HEIGHT - WINDOW_INITIAL_HEIGHT
+  private pluginDefaultHeight: number = WINDOW_DEFAULT_HEIGHT - STANDARD_MAIN_WINDOW_HEADER_HEIGHT
   // 跟踪每个插件上次进入的状态（用于单例重入判断）
   private pluginLastEnterState: Map<string, PluginLastEnterState> = new Map()
 
@@ -542,6 +574,7 @@ export class PluginManager {
     // === 所有 async 操作完成，提交状态 ===
     this.pluginView = view
     this.currentPluginPath = pluginPath
+    cached.cmdName = cmdName || ''
 
     console.log('[Plugin] 插件视图获取焦点')
     view.webContents.focus()
@@ -611,7 +644,8 @@ export class PluginManager {
         featureCode
       })
       // 插件加载时，先将窗口高度设置为 1px，避免节流
-      api.resizeWindow(WINDOW_INITIAL_HEIGHT + 1)
+      const mainContentHeight = windowManager.getMainWindowHeaderHeight()
+      api.resizeWindow(mainContentHeight + 1)
       const pluginConfig = this.readPluginConfig(pluginPath)
       const isDevelopment = !!pluginInfoFromDB?.isDevelopment
       const effectiveName = pluginInfoFromDB?.name || pluginConfig.name
@@ -632,7 +666,7 @@ export class PluginManager {
       // 设置初始布局（使用固定宽度常量，避免多显示器 DPI 缩放导致尺寸漂移）
       const windowWidth = WINDOW_WIDTH
       // 设置初始高度为 1px，避免节流
-      this.pluginView.setBounds({ x: 0, y: WINDOW_INITIAL_HEIGHT, width: windowWidth, height: 1 })
+      this.pluginView.setBounds({ x: 0, y: mainContentHeight, width: windowWidth, height: 1 })
 
       // 缓存新创建的视图
       const logoUrl = this.buildPluginLogoUrl(pluginPath, pluginConfig.logo)
@@ -640,6 +674,7 @@ export class PluginManager {
         path: pluginPath,
         name: effectiveName,
         view: this.pluginView,
+        cmdName: cmdName || '',
         subInputPlaceholder: '搜索',
         subInputVisible: false,
         logo: logoUrl,
@@ -677,7 +712,9 @@ export class PluginManager {
           this.assemblyCoordinator.markSessionStatus(assembly, 'domReady')
         }
 
-        view.webContents.insertCSS(GLOBAL_SCROLLBAR_CSS)
+        // 页面完成 DOM 初始化后注入宿主统一样式和当前主题色。
+        void view.webContents.insertCSS(GLOBAL_SCROLLBAR_CSS)
+        void view.webContents.insertCSS(buildPluginThemeCSS(getCurrentPluginThemeState()))
         await this.processPluginMode(pluginPath, featureCode, view, assembly)
         this.sendPluginLoadedEvent(effectiveName, pluginPath)
         // 修复 Windows 首次进入插件时的白屏：新建视图同样需要触发重绘
@@ -846,7 +883,7 @@ export class PluginManager {
   // 检查并终止插件
   private checkAndKillPlugin(pluginName: string, pluginPath: string): void {
     try {
-      const data = api.dbGet('outKillPlugin')
+      const data = api.dbGet('out-kill-plugin')
       if (Array.isArray(data) && data.includes(pluginName)) {
         console.log(`插件 ${pluginName} 配置为退出后立即结束，销毁 view`)
         this.killPlugin(pluginPath)
@@ -879,6 +916,123 @@ export class PluginManager {
   // 获取当前加载的插件视图
   public getCurrentPluginView(): WebContentsView | null {
     return this.pluginView
+  }
+
+  /**
+   * 保存发起升级的插件重启上下文，并把对应插件区域收起到 0 高度。
+   * @param pluginName 需要升级的插件名称
+   * @param pluginPath 当前插件物理路径
+   * @param webContents 发起升级请求的渲染进程
+   * @returns 可用于升级后重新打开插件的上下文；调用来源不匹配时返回 null
+   */
+  public collapseCurrentPluginForUpgrade(
+    pluginName: string,
+    pluginPath: string,
+    webContents?: WebContents
+  ): PluginUpgradeRelaunchContext | null {
+    // 独立标题栏发起升级时，保存其窗口尺寸并只收起对应的插件内容区。
+    const detachedSnapshot = webContents
+      ? detachedWindowManager.collapsePluginForUpgrade(pluginName, pluginPath, webContents)
+      : null
+    if (detachedSnapshot) {
+      const lastEnterState = this.pluginLastEnterState.get(pluginPath)
+      return {
+        surface: 'detached',
+        pluginName,
+        pluginPath,
+        featureCode: lastEnterState?.featureCode || '',
+        cmdType: lastEnterState?.cmdType || api.getLaunchParam()?.type || 'text',
+        param: api.getLaunchParam() || {},
+        height: detachedSnapshot.viewHeight,
+        detachedSnapshot
+      }
+    }
+
+    if (
+      !this.pluginView ||
+      this.currentPluginPath !== pluginPath ||
+      this.pluginViews.find((plugin) => plugin.path === pluginPath)?.name !== pluginName
+    ) {
+      return null
+    }
+
+    // 在安装器销毁旧视图前保存原指令和高度，避免升级完成后丢失进入状态。
+    const cached = this.pluginViews.find((plugin) => plugin.path === pluginPath)
+    const lastEnterState = this.pluginLastEnterState.get(pluginPath)
+    const currentBounds = this.pluginView.getBounds()
+    const height =
+      currentBounds.height > 0
+        ? currentBounds.height
+        : cached?.height && cached.height > 0
+          ? cached.height
+          : this.pluginDefaultHeight
+    const context: PluginUpgradeRelaunchContext = {
+      surface: 'main',
+      pluginName,
+      pluginPath,
+      featureCode: lastEnterState?.featureCode || '',
+      cmdName: cached?.cmdName,
+      cmdType: lastEnterState?.cmdType || api.getLaunchParam()?.type || 'text',
+      param: api.getLaunchParam() || {},
+      height
+    }
+
+    // 保留主搜索栏和升级进度，同时彻底隐藏即将被替换的插件内容。
+    this.setExpendHeight(0, false)
+    return context
+  }
+
+  /**
+   * 升级结束后恢复仍存活的旧视图，或按保存的进入状态重新启动插件。
+   * @param context 升级开始前保存的插件进入上下文
+   * @param pluginPath 安装完成后应打开的插件物理路径
+   * @param installSucceeded 市场安装是否成功完成
+   * @returns 恢复或重新启动结果
+   */
+  public async reopenPluginAfterUpgrade(
+    context: PluginUpgradeRelaunchContext,
+    pluginPath: string,
+    installSucceeded: boolean
+  ): Promise<{ success: boolean; error?: string }> {
+    if (context.surface === 'detached' && context.detachedSnapshot) {
+      // 安装器通过延迟关闭发布 PluginOut，等待旧独立窗口完成清理后再决定恢复或重建。
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, PLUGIN_OUT_GRACE_MS + 20)
+      })
+
+      // 下载或安装失败且旧窗口仍存活时，原地恢复以保留窗口位置和焦点。
+      if (
+        !installSucceeded &&
+        detachedWindowManager.restorePluginAfterFailedUpgrade(context.detachedSnapshot)
+      ) {
+        return { success: true }
+      }
+
+      // 发布成功或旧窗口已退出时，始终重新创建独立窗口并复用升级前的进入参数。
+      return await this.createPluginInDetachedWindow(
+        pluginPath,
+        context.featureCode,
+        context.param as EnterPayload
+      )
+    }
+
+    if (this.pluginView && this.currentPluginPath === pluginPath) {
+      // 下载或安装失败但旧视图仍存活时，直接恢复原高度和焦点。
+      this.setExpendHeight(context.height, false)
+      this.pluginView.webContents.focus()
+      this.forceRepaintView(this.pluginView)
+      return { success: true }
+    }
+
+    // 旧视图已被安装器销毁时，从当前注册路径创建新版本视图。
+    return await api.launchPlugin({
+      path: pluginPath,
+      type: 'plugin',
+      featureCode: context.featureCode || undefined,
+      param: context.param,
+      name: context.cmdName,
+      cmdType: context.cmdType
+    })
   }
 
   /**
@@ -985,7 +1139,9 @@ export class PluginManager {
 
       view.webContents.once('dom-ready', () => {
         this.assemblyCoordinator.markDomReady(view.webContents.id)
-        view.webContents.insertCSS(GLOBAL_SCROLLBAR_CSS)
+        // 后台页面也需要先具备主题色，避免首次切到前台时出现颜色闪烁。
+        void view.webContents.insertCSS(GLOBAL_SCROLLBAR_CSS)
+        void view.webContents.insertCSS(buildPluginThemeCSS(getCurrentPluginThemeState()))
         console.log('[Plugin] 后台预加载插件完成:', {
           pluginName: effectiveName,
           pluginPath,
@@ -1266,14 +1422,19 @@ export class PluginManager {
     }
   }
 
-  // 设置插件视图高度
+  /**
+   * 设置主窗口插件视图高度，并按当前顶部栏高度同步窗口尺寸和视图偏移。
+   * @param height 插件正文期望高度，单位为像素。
+   * @param updateCache 是否更新当前插件缓存中的正文高度。
+   * @returns 无返回值。
+   */
   public setExpendHeight(height: number, updateCache: boolean = true): void {
     if (!this.mainWindow || !this.pluginView) return
 
     console.log('[Plugin] 设置插件高度:', height)
 
-    // 搜索框高度
-    const mainContentHeight = WINDOW_INITIAL_HEIGHT
+    // 顶部栏高度由当前紧凑模式统一决定。
+    const mainContentHeight = windowManager.getMainWindowHeaderHeight()
     // 计算总窗口高度
     const totalHeight = height + mainContentHeight
 
@@ -1331,11 +1492,16 @@ export class PluginManager {
     }
   }
 
-  // 更新插件视图大小（跟随窗口大小变化）
+  /**
+   * 根据主窗口尺寸更新当前插件视图边界。
+   * @param width 主窗口内容宽度，单位为像素。
+   * @param height 主窗口内容高度，单位为像素。
+   * @returns 无返回值。
+   */
   public updatePluginViewBounds(width: number, height: number): void {
     if (!this.pluginView) return
 
-    const mainContentHeight = WINDOW_INITIAL_HEIGHT
+    const mainContentHeight = windowManager.getMainWindowHeaderHeight()
     const viewHeight = height - mainContentHeight
 
     if (viewHeight > 0) {
@@ -1352,6 +1518,18 @@ export class PluginManager {
         cached.height = viewHeight
       }
     }
+  }
+
+  /**
+   * 在顶部栏密度变化后重新布局当前插件，并保持插件正文高度不变。
+   * @returns 无返回值。
+   */
+  public refreshMainWindowHeaderLayout(): void {
+    if (!this.pluginView) return
+
+    // 使用当前视图真实高度，避免切换密度时覆盖插件主动设置的高度。
+    const { height } = this.pluginView.getBounds()
+    this.setExpendHeight(height, false)
   }
 
   // 获取插件模式
@@ -1650,10 +1828,22 @@ export class PluginManager {
     })
   }
 
-  // 处理插件按 ESC 键
+  /**
+   * 处理主窗口插件 WebContents 上报的 ESC，并按用户设置返回搜索或直接隐藏。
+   * @returns 无返回值。
+   */
   public handlePluginEsc(): void {
     // 记录 ESC 触发时间
     this.lastPluginEscTime = Date.now()
+
+    const settings = databaseAPI.dbGet('settings-general') || {}
+    if (settings.hideMainWindowOnPluginEsc === true) {
+      // 隐藏流程会按已强制为 immediately 的自动返回配置在后台退出插件。
+      console.log('[Plugin] 插件按下 ESC，直接隐藏主窗口')
+      windowManager.hideWindow()
+      return
+    }
+
     console.log('[Plugin] 插件按下 ESC 键 (Main Process)，返回搜索页面')
     this.hidePluginView()
     windowManager.notifyBackToSearch()
@@ -1696,7 +1886,7 @@ export class PluginManager {
    */
   private getStoredDetachedSize(pluginName: string): { width: number; height: number } | null {
     try {
-      const sizes = api.dbGet('detachedWindowSizes')
+      const sizes = api.dbGet('detached-window-sizes')
       const sizeKey = getDetachedWindowSizeKey(pluginName)
       if (sizes && typeof sizes === 'object' && !Array.isArray(sizes) && sizes[sizeKey]) {
         const rawSize = sizes[sizeKey]
@@ -1722,11 +1912,13 @@ export class PluginManager {
    * 直接在独立窗口中创建插件（用于自动分离模式）
    * @param pluginPath 插件路径
    * @param featureCode 功能代码
+   * @param enterParam 插件进入参数；省略时读取当前全局启动参数
    * @returns 创建结果
    */
   public async createPluginInDetachedWindow(
     pluginPath: string,
-    featureCode: string
+    featureCode: string,
+    enterParam?: EnterPayload
   ): Promise<{ success: boolean; error?: string }> {
     try {
       console.log('[Plugin] 直接在独立窗口中创建插件:', { pluginPath, featureCode })
@@ -1794,9 +1986,12 @@ export class PluginManager {
       pluginView.webContents.loadURL(pluginUrl)
 
       pluginView.webContents.on('did-finish-load', () => {
-        pluginView.webContents.insertCSS(GLOBAL_SCROLLBAR_CSS)
+        // 独立插件窗口加载完成后注入与主视图一致的主题色变量。
+        void pluginView.webContents.insertCSS(GLOBAL_SCROLLBAR_CSS)
+        void pluginView.webContents.insertCSS(buildPluginThemeCSS(getCurrentPluginThemeState()))
+        // 升级重开时优先使用快照，避免其他启动动作覆盖插件原进入参数。
         const enterPayload = this.assemblyCoordinator.buildEnterPayload(
-          api.getLaunchParam() as EnterPayload
+          enterParam ?? (api.getLaunchParam() as EnterPayload)
         )
         void this.assemblyCoordinator.dispatchLifecycleEvent(
           pluginView,
@@ -1821,8 +2016,8 @@ export class PluginManager {
   }
 
   /**
-   * 分离当前插件到独立窗口
-   * 将当前在主窗口中运行的插件分离到一个独立的窗口中
+   * 将当前在主窗口中运行的插件视图迁移到独立窗口。
+   * @returns 分离是否成功以及可选错误信息
    */
   public async detachCurrentPlugin(): Promise<{ success: boolean; error?: string }> {
     if (!this.mainWindow || !this.pluginView || !this.currentPluginPath) {
@@ -1882,7 +2077,9 @@ export class PluginManager {
           searchQuery: cached.subInputValue || '',
           searchPlaceholder: cached.subInputPlaceholder || '搜索...',
           subInputVisible: cached.subInputVisible !== undefined ? cached.subInputVisible : true,
-          autoFocusSubInput: shouldAutoFocusSubInput // 只有主窗口输入框聚焦时才自动聚焦
+          autoFocusSubInput: shouldAutoFocusSubInput, // 只有主窗口输入框聚焦时才自动聚焦
+          // 独立标题栏可能晚于请求开始加载，因此初始化时同步当前聚合状态。
+          aiRequestStatus: aiRequestStatusTracker.get(cached.view.webContents.id)
         }
       )
 
@@ -1972,6 +2169,29 @@ export class PluginManager {
     }
 
     return null
+  }
+
+  /**
+   * 获取调用 WebContents 对应清单中的规范插件名称。
+   * @param webContents 插件页面的 WebContents 实例。
+   * @returns 清单名称与运行时插件匹配时返回规范名称，否则返回 null。
+   */
+  public getPluginManifestNameByWebContents(webContents: WebContents): string | null {
+    const pluginInfo = this.getPluginInfoByWebContents(webContents)
+    if (!pluginInfo) return null
+
+    try {
+      // 开发插件会附加 __dev 后缀，鉴权身份仍使用原始清单名称。
+      const manifestName = this.readPluginConfig(pluginInfo.path)?.name
+      if (typeof manifestName !== 'string' || !manifestName.trim()) return null
+      const canonicalName = manifestName.trim()
+      if (pluginInfo.name !== canonicalName && pluginInfo.name !== `${canonicalName}__dev`) {
+        return null
+      }
+      return canonicalName
+    } catch {
+      return null
+    }
   }
 
   /**
